@@ -130,6 +130,40 @@ describe("windowed context handoff", () => {
 		expect(huge.endsWith("</sol-pi-window>")).toBe(true);
 	});
 
+	it("keeps the recorded evidence and the note index when the plan is long", () => {
+		// The fragment is the only record that survives the compaction, so a
+		// verbose plan must not be able to push out the progress record or the
+		// note index that recovers everything else.
+		const fragment = formatWindowFragment({
+			epoch: 4,
+			plan: Array.from({ length: 16 }, (_, index) => ({
+				id: `step-${index}`,
+				goal: "G".repeat(600),
+				status: "completed" as const,
+			})),
+			progress: [SUMMARY],
+			notesIndex: ["api-surface (900 bytes)", "open-questions (400 bytes)"],
+		});
+		expect(Buffer.byteLength(fragment, "utf8")).toBeLessThanOrEqual(WINDOW_FRAGMENT_MAX_BYTES);
+		expect(fragment).toContain("Recorded progress:");
+		expect(fragment).toContain("files: src/a.ts");
+		expect(fragment).toContain("Notes index:");
+		expect(fragment).toContain("- api-surface (900 bytes)");
+		expect(fragment).toContain("- open-questions (400 bytes)");
+		expect(fragment).toContain("[sol-pi-window truncated to fit its byte budget]");
+		expect(fragment.endsWith("</sol-pi-window>")).toBe(true);
+	});
+
+	it("preserves the recorded commands verbatim apart from the tag delimiters", () => {
+		const fragment = formatWindowFragment({
+			epoch: 1,
+			plan: PLAN,
+			progress: [{ ...SUMMARY, verification: ["npm test && npm run check"], decisions: ["picked A&B over C"] }],
+		});
+		expect(fragment).toContain("verification: npm test && npm run check");
+		expect(fragment).toContain("decisions: picked A&B over C");
+	});
+
 	it("cannot be broken out of by model-supplied text", () => {
 		const fragment = formatWindowFragment({
 			epoch: 1,

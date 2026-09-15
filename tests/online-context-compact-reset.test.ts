@@ -201,4 +201,33 @@ describe("new_context", () => {
 		await pi.emit("agent_settled", { type: "agent_settled" }, context);
 		await settled;
 	});
+
+	it("declines instead of scheduling a compaction Pi cannot perform", async () => {
+		const root = mkdtempSync(join(tmpdir(), "sol-pi-occ-newcontext-empty-"));
+		const manager = new FakeSessionManager([], "session-a", root);
+		const pi = new FakePi(manager);
+		createOnlineContextCompactExtension({ cacheWriteReadRatio: 12.5 })(pi.asExtensionApi());
+
+		const compact = vi.fn();
+		const context = fakeContext(manager, {
+			compact,
+			isIdle: () => true,
+			getSystemPrompt: () => "test prompt",
+		});
+
+		await pi.emit("session_start", { type: "session_start" }, context);
+		const newContext = pi.tool("new_context").execute as Execute;
+		const declined = await newContext("call-1", {}, undefined, undefined, context);
+
+		expect(declined.details).toMatchObject({
+			op: "new_context",
+			requested: false,
+			reason: "native_not_compactable",
+		});
+		expect(declined.content[0]?.text).toContain("Not enough recorded history");
+
+		// The request was never recorded, so settlement stays quiet.
+		await pi.emit("agent_settled", { type: "agent_settled" }, context);
+		expect(compact).not.toHaveBeenCalled();
+	});
 });

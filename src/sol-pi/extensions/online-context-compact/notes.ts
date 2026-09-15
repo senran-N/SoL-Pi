@@ -72,15 +72,17 @@ export async function appendNote(root: string, slug: string, body: string): Prom
 	const path = notePath(root, slug);
 	await mkdir(notesDirectory(root), { recursive: true });
 	const existing = await readNote(root, slug);
-	let total = Buffer.byteLength(addition, "utf8");
-	if (existing !== undefined && existing.length > 0) {
-		const separator = existing.endsWith("\n") ? "" : "\n";
-		total += Buffer.byteLength(`${separator}${existing}`, "utf8");
-	}
+	// Notes this module writes always end in a newline, but a hand-edited file
+	// may not: write the separator rather than only charging for it, so an
+	// append can never land on the end of an existing line.
+	const separator = existing !== undefined && existing.length > 0 && !existing.endsWith("\n") ? "\n" : "";
+	const payload = `${separator}${addition}`;
+	const total =
+		Buffer.byteLength(payload, "utf8") + (existing === undefined ? 0 : Buffer.byteLength(existing, "utf8"));
 	if (total > NOTE_MAX_BYTES) {
 		throw new Error(`Online Context Compact note "${slug}" would exceed ${NOTE_MAX_BYTES} bytes`);
 	}
-	await appendFile(path, addition, "utf8");
+	await appendFile(path, payload, "utf8");
 	return { slug, bytes: total };
 }
 

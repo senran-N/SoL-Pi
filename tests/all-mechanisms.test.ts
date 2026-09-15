@@ -70,19 +70,19 @@ describe("SoL-Pi entrypoint", () => {
 			onlineContextCompact: true,
 		});
 
-			expect(pi.registeredTools.map((tool) => tool.name)).toEqual([
-				"edit",
-				"write",
-				"obs_recall",
-				"update_plan",
-				"note_write",
-				"note_append",
-				"note_read",
-				"get_context_remaining",
-				"new_context",
-				"history_search",
-				"history_read",
-			]);
+		expect(pi.registeredTools.map((tool) => tool.name)).toEqual([
+			"edit",
+			"write",
+			"obs_recall",
+			"update_plan",
+			"note_write",
+			"note_append",
+			"note_read",
+			"get_context_remaining",
+			"new_context",
+			"history_search",
+			"history_read",
+		]);
 		expect([...pi.handlers.keys()].sort()).toEqual([
 			"agent_settled",
 			"before_provider_request",

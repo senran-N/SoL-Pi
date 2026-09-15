@@ -47,7 +47,12 @@ function byteLength(text: string): number {
 
 function sliceBytes(text: string, maxBytes: number): string {
 	if (byteLength(text) <= maxBytes) return text;
-	return Buffer.from(text, "utf8").subarray(0, maxBytes).toString("utf8");
+	const buffer = Buffer.from(text, "utf8");
+	// Back off past any continuation byte so the cut never splits a character
+	// into a replacement glyph.
+	let end = maxBytes;
+	while (end > 0 && ((buffer[end] ?? 0) & 0xc0) === 0x80) end -= 1;
+	return buffer.subarray(0, end).toString("utf8");
 }
 
 function textFromContent(content: unknown): string {

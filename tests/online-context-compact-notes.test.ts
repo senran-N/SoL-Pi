@@ -2,7 +2,7 @@
  * SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  * SPDX-License-Identifier: MIT
  */
-import { mkdtempSync, readFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { AgentMessage } from "@earendil-works/pi-agent-core";
@@ -107,6 +107,17 @@ describe("durable notes", () => {
 		await writeNote(root, "plan", "keep me");
 		await expect(appendNote(root, "plan", "y".repeat(NOTE_MAX_BYTES))).rejects.toThrow(/would exceed/u);
 		expect(await readNote(root, "plan")).toBe("keep me\n");
+	});
+
+	it("separates an append from a hand-edited note that has no trailing newline", async () => {
+		const root = noteRoot();
+		await writeNote(root, "plan", "first line");
+		writeFileSync(notePath(root, "plan"), "hand edited", "utf8");
+
+		const entry = await appendNote(root, "plan", "appended line");
+
+		expect(await readNote(root, "plan")).toBe("hand edited\nappended line\n");
+		expect(entry.bytes).toBe(Buffer.byteLength("hand edited\nappended line\n", "utf8"));
 	});
 });
 
