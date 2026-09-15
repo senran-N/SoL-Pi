@@ -181,4 +181,33 @@ describe("history tools", () => {
 			'Unknown history entry id "nope"',
 		);
 	});
+
+	it("stays on the current branch instead of resurfacing abandoned work", async () => {
+		// The session file is append-only, so a fork or a rewind leaves the
+		// abandoned entries in getEntries(). Recall must not hand a decision the
+		// user backed out of to the model as if it were still current.
+		const abandoned = entry({
+			type: "message",
+			id: "abandoned",
+			parentId: "e1",
+			timestamp: "2026-01-01T00:00:03.000Z",
+			message: { role: "assistant", content: "Deploying the widget to production instead." },
+		});
+		const branch = historyEntries();
+		const root = mkdtempSync(join(tmpdir(), "sol-pi-occ-history-branch-"));
+		const manager = new FakeSessionManager([...branch, abandoned], "session-a", root);
+		manager.getBranch = (): SessionEntry[] => branch;
+		const pi = new FakePi(manager);
+		createOnlineContextCompactExtension({ cacheWriteReadRatio: 12.5 })(pi.asExtensionApi());
+		const context = fakeContext(manager);
+
+		const search = pi.tool("history_search").execute as Execute;
+		const found = await search("call-1", { query: "production" }, undefined, undefined, context);
+		expect(found.details).toMatchObject({ total: 0 });
+
+		const read = pi.tool("history_read").execute as Execute;
+		await expect(read("call-2", { id: "abandoned" }, undefined, undefined, context)).rejects.toThrow(
+			'Unknown history entry id "abandoned"',
+		);
+	});
 });

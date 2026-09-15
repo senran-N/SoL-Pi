@@ -297,6 +297,15 @@ export function createOnlineContextCompactExtension(options: OnlineContextCompac
 			newContext: async (input) => {
 				ensureRestored(input.context);
 				if (input.signal?.aborted) throw new Error("Context reset was aborted");
+				// Pi refuses to compact a session that has nothing to archive, so a
+				// request it could not honor is declined here rather than recorded and
+				// dropped at settlement.
+				if (!nativeCompactionFeasible(input.context.sessionManager.getBranch(), keepRecentTokens)) {
+					return result(
+						"Not enough recorded history to start a new window yet, so nothing was reset. Keep working and call new_context again once the context is actually filling up.",
+						{ op: "new_context", requested: false, reason: "native_not_compactable", task_status: "active" },
+					);
+				}
 				resetRequested = true;
 				return result(
 					"Context window reset requested. It is applied once the current turn settles: the recorded plan, progress, and note index become the checkpoint of the new window, and no summarization request is sent.",
@@ -327,7 +336,10 @@ export function createOnlineContextCompactExtension(options: OnlineContextCompac
 			historySearch: async (input) => {
 				ensureRestored(input.context);
 				if (input.signal?.aborted) throw new Error("History search was aborted");
-				const entries = input.context.sessionManager.getEntries();
+				// getBranch() keeps recall on the current path: it still reaches work a
+				// compaction removed from the window, but never resurfaces a branch the
+				// user forked or rewound away from.
+				const entries = input.context.sessionManager.getBranch();
 				const limit = input.limit ?? HISTORY_DEFAULT_LIMIT;
 				const search = searchHistory(entries, input.query, limit);
 				if (search.total === 0) {
@@ -357,7 +369,7 @@ export function createOnlineContextCompactExtension(options: OnlineContextCompac
 			historyRead: async (input) => {
 				ensureRestored(input.context);
 				if (input.signal?.aborted) throw new Error("History read was aborted");
-				const found = readHistoryEntry(input.context.sessionManager.getEntries(), input.id);
+				const found = readHistoryEntry(input.context.sessionManager.getBranch(), input.id);
 				if (!found) throw new Error(`Unknown history entry id "${input.id}". Use history_search to find an id.`);
 				return result(`[${found.kind}] #${found.index}\n${found.text}`, {
 					op: "history_read",
@@ -468,6 +480,13 @@ export function createOnlineContextCompactExtension(options: OnlineContextCompac
 				return;
 			}
 			if (requestedReset) resetRequested = false;
+			// The priced path already cleared this check at turn_end; a reset that
+			// arrives on its own has not, and Pi throws rather than no-ops when there
+			// is nothing to archive.
+			if (!pending && !nativeCompactionFeasible(context.sessionManager.getBranch(), keepRecentTokens)) {
+				releaseParentContinuation(parentContinuation);
+				return;
+			}
 
 			// Windowed handoff: when structured state can rebuild the handoff, hand Pi a
 			// synthetic compaction result so no summarization request is sent. An
@@ -491,6 +510,12 @@ export function createOnlineContextCompactExtension(options: OnlineContextCompac
 						repaymentTokens: Math.max(0, pending.decision.archiveTokens - pending.decision.memoTokens),
 					}
 				: { debtTokens: 0, repaymentTokens: 0 };
+			// A reset carries no priced decision, so measure what it is about to
+			// archive the same way turn_end does; otherwise it reports no savings at
+			// all.
+			const archiveTokens = pending
+				? pending.decision.archiveTokens
+				: Math.max(0, contextTokens(context) - tokenEstimate(context.getSystemPrompt()) - keepRecentTokens);
 			let compacted = false;
 			let compactionError: Error | undefined;
 			try {
@@ -507,10 +532,7 @@ export function createOnlineContextCompactExtension(options: OnlineContextCompac
 						onComplete: (compaction) => {
 							try {
 								compacted = true;
-								const removed = Math.max(
-									0,
-									(pending?.decision.archiveTokens ?? 0) - tokenEstimate(compaction.summary),
-								);
+								const removed = Math.max(0, archiveTokens - tokenEstimate(compaction.summary));
 								if (removed > 0) {
 									showSolPiSavings(
 										context,

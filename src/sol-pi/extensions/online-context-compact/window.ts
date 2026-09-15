@@ -24,6 +24,17 @@ export const WINDOW_CONTINUITY_INSTRUCTION =
 const WINDOW_TAG = "sol-pi-window";
 const TRUNCATION_MARKER = "[sol-pi-window truncated to fit its byte budget]";
 const MAX_LINE_BYTES = 512;
+/**
+ * Floors, not quotas: a section gets at least this many bytes when it has that
+ * much to say, plus anything an earlier section leaves unused. Without them a
+ * long plan eats the whole budget, and what it pushes out is exactly what
+ * cannot be reconstructed once the compaction lands: the recorded evidence,
+ * and the note index that points at every note body still on disk.
+ */
+const PROGRESS_RESERVED_BYTES = 1_536;
+const NOTES_INDEX_RESERVED_BYTES = 1_152;
+/** A blank separator plus the section heading; a heading alone is noise. */
+const SECTION_HEADING_LINES = 2;
 
 export type CompactionMode = "reset" | "summary";
 
@@ -82,47 +93,63 @@ export function formatWindowFragment(input: WindowResetInput): string {
 	const open = `<${WINDOW_TAG} ${attributes.join(" ")}>`;
 	const close = `</${WINDOW_TAG}>`;
 
-	const lines: string[] = [sanitize(WINDOW_CONTINUITY_INSTRUCTION)];
-	appendPlan(lines, input.plan);
-	appendProgress(lines, input.progress);
-	appendNotes(lines, input.notesIndex ?? []);
-	return fitLines(open, close, lines);
+	return renderFragment(open, close, sanitize(WINDOW_CONTINUITY_INSTRUCTION), [
+		{ lines: planLines(input.plan), reservedBytes: 0 },
+		{ lines: progressLines(input.progress), reservedBytes: PROGRESS_RESERVED_BYTES },
+		{ lines: notesLines(input.notesIndex ?? []), reservedBytes: NOTES_INDEX_RESERVED_BYTES },
+	]);
 }
 
-function appendPlan(lines: string[], plan: readonly PlanStep[]): void {
-	if (plan.length === 0) return;
-	lines.push("", "Plan:");
+type Section = { readonly lines: readonly string[]; readonly reservedBytes: number };
+type FittedSection = { readonly kept: readonly string[]; readonly used: number; readonly truncated: boolean };
+
+function planLines(plan: readonly PlanStep[]): readonly string[] {
+	if (plan.length === 0) return [];
+	const lines = ["", "Plan:"];
 	for (const step of plan) {
 		lines.push(`- [${step.status}] ${sanitize(step.id)}: ${sanitize(step.goal)}`);
 	}
+	return lines;
 }
 
-function appendProgress(lines: string[], progress: readonly ProgressSummary[]): void {
-	if (progress.length === 0) return;
-	lines.push("", "Recorded progress:");
+function progressLines(progress: readonly ProgressSummary[]): readonly string[] {
+	if (progress.length === 0) return [];
+	const lines = ["", "Recorded progress:"];
 	for (const summary of progress) {
 		lines.push(`- ${sanitize(summary.stepId)}: ${sanitize(summary.goal)}`);
-		const files = summary.filesChanged.map((value) => sanitize(value)).filter((value) => value.length > 0);
-		const verification = summary.verification.map((value) => sanitize(value)).filter((value) => value.length > 0);
-		const decisions = summary.decisions.map((value) => sanitize(value)).filter((value) => value.length > 0);
-		const nextWork = summary.nextWork.map((value) => sanitize(value)).filter((value) => value.length > 0);
+		const files = sanitizeAll(summary.filesChanged);
+		const verification = sanitizeAll(summary.verification);
+		const decisions = sanitizeAll(summary.decisions);
+		const nextWork = sanitizeAll(summary.nextWork);
 		if (files.length > 0) lines.push(`  files: ${files.join(", ")}`);
 		if (verification.length > 0) lines.push(`  verification: ${verification.join("; ")}`);
 		if (decisions.length > 0) lines.push(`  decisions: ${decisions.join("; ")}`);
 		if (nextWork.length > 0) lines.push(`  next: ${nextWork.join("; ")}`);
 	}
+	return lines;
 }
 
-function appendNotes(lines: string[], notesIndex: readonly string[]): void {
-	if (notesIndex.length === 0) return;
-	lines.push("", "Notes index:");
+function notesLines(notesIndex: readonly string[]): readonly string[] {
+	if (notesIndex.length === 0) return [];
+	const lines = ["", "Notes index:"];
 	for (const entry of notesIndex) lines.push(`- ${sanitize(entry)}`);
+	return lines;
 }
 
-/** Collapse whitespace, drop markup that would break the fragment envelope, and bound one line. */
+function sanitizeAll(values: readonly string[]): readonly string[] {
+	return values.map((value) => sanitize(value)).filter((value) => value.length > 0);
+}
+
+/**
+ * Collapse whitespace, drop the markup that would break the fragment envelope,
+ * and bound one line. Only the angle brackets that could close the tag are
+ * removed: the fragment is plain prompt text, so stripping anything else would
+ * quietly rewrite the very commands and paths the progress record exists to
+ * preserve.
+ */
 function sanitize(text: string, maxBytes = MAX_LINE_BYTES): string {
 	const collapsed = text
-		.replace(/[<>&\u0000-\u001f\u007f]/gu, " ")
+		.replace(/[<>\u0000-\u001f\u007f]/gu, " ")
 		.replace(/\s+/gu, " ")
 		.trim();
 	if (Buffer.byteLength(collapsed, "utf8") <= maxBytes) return collapsed;
@@ -134,28 +161,56 @@ function sanitize(text: string, maxBytes = MAX_LINE_BYTES): string {
 	return `${truncated}...`;
 }
 
-function fitLines(open: string, close: string, lines: readonly string[]): string {
-	// The join adds one newline between every pair of parts, so the open and
-	// close tags consume their own bytes plus a separator each.
-	let budget = WINDOW_FRAGMENT_MAX_BYTES - Buffer.byteLength(open, "utf8") - Buffer.byteLength(close, "utf8") - 1;
+/** One line plus the newline that follows it in the joined fragment. */
+function lineCost(line: string): number {
+	return Buffer.byteLength(line, "utf8") + 1;
+}
+
+function sectionCost(lines: readonly string[]): number {
+	return lines.reduce((total, line) => total + lineCost(line), 0);
+}
+
+/** Fill one section in order, stopping at the first line that does not fit. */
+function fitSection(lines: readonly string[], budget: number): FittedSection {
 	const kept: string[] = [];
-	let truncated = false;
+	let used = 0;
 	for (const line of lines) {
-		const cost = Buffer.byteLength(line, "utf8") + 1;
-		if (cost > budget) {
-			truncated = true;
-			break;
+		const cost = lineCost(line);
+		if (used + cost > budget) {
+			// A heading with nothing under it is noise, so drop the section whole.
+			if (kept.length <= SECTION_HEADING_LINES) return { kept: [], used: 0, truncated: true };
+			return { kept, used, truncated: true };
 		}
 		kept.push(line);
-		budget -= cost;
+		used += cost;
 	}
-	if (truncated) {
-		const markerCost = Buffer.byteLength(TRUNCATION_MARKER, "utf8") + 1;
-		while (kept.length > 0 && markerCost > budget) {
-			const removed = kept.pop() ?? "";
-			budget += Buffer.byteLength(removed, "utf8") + 1;
+	return { kept, used, truncated: false };
+}
+
+function renderFragment(open: string, close: string, continuity: string, sections: readonly Section[]): string {
+	// The join puts one newline between every pair of parts, so each part except
+	// the closing tag carries its own separator. The truncation marker is held
+	// back up front so it always has room to be appended.
+	let budget =
+		WINDOW_FRAGMENT_MAX_BYTES - lineCost(open) - Buffer.byteLength(close, "utf8") - lineCost(TRUNCATION_MARKER);
+	const kept: string[] = [];
+	if (lineCost(continuity) <= budget) {
+		kept.push(continuity);
+		budget -= lineCost(continuity);
+	}
+
+	let truncated = false;
+	for (const [index, section] of sections.entries()) {
+		if (section.lines.length === 0) continue;
+		let reservedForLater = 0;
+		for (const later of sections.slice(index + 1)) {
+			reservedForLater += Math.min(sectionCost(later.lines), later.reservedBytes);
 		}
-		if (markerCost <= budget) kept.push(TRUNCATION_MARKER);
+		const fitted = fitSection(section.lines, budget - reservedForLater);
+		kept.push(...fitted.kept);
+		budget -= fitted.used;
+		truncated ||= fitted.truncated;
 	}
+	if (truncated) kept.push(TRUNCATION_MARKER);
 	return [open, ...kept, close].join("\n");
 }
