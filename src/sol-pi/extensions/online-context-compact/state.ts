@@ -18,6 +18,10 @@ export type ProgressSummary = {
 
 export type OnlineState = {
 	readonly version: 1;
+	/**
+	 * Context resets of any kind: compactions and corrections both start a new
+	 * epoch. This is not a window number; `nativeCompactionCount` is.
+	 */
 	readonly epoch: number;
 	readonly plan: readonly PlanStep[];
 	readonly pendingProgress: readonly ProgressSummary[];
@@ -27,6 +31,7 @@ export type OnlineState = {
 	readonly lastContextTokens: number | null;
 	readonly positiveContextDeltaTotal: number;
 	readonly positiveContextDeltaCount: number;
+	/** Compactions recorded so far, and therefore the number of the last window. */
 	readonly nativeCompactionCount: number;
 	readonly cacheDebtTokens: number;
 	readonly cacheDebtRepaymentTokens: number;

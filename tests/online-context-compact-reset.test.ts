@@ -230,4 +230,106 @@ describe("new_context", () => {
 		await pi.emit("agent_settled", { type: "agent_settled" }, context);
 		expect(compact).not.toHaveBeenCalled();
 	});
+
+	it("numbers windows by compaction, so a correction in between does not skip one", async () => {
+		// A correction starts a new epoch without producing a checkpoint. If window
+		// numbers followed the epoch, the second window would call itself w3 and
+		// point at a w2 that never existed.
+		const root = mkdtempSync(join(tmpdir(), "sol-pi-occ-window-numbering-"));
+		const manager = new FakeSessionManager([], "session-a", root);
+		manager.appendMessage({ role: "user", content: `old ${"x".repeat(2_000)}`, timestamp: Date.now() });
+		manager.appendMessage(assistant(`work ${"y".repeat(2_000)}`));
+		const pi = new FakePi(manager);
+		createOnlineContextCompactExtension({ cacheWriteReadRatio: 12.5, keepRecentTokens: 1 })(pi.asExtensionApi());
+
+		let idle = true;
+		let compactions = 0;
+		const fragments: string[] = [];
+		let context: ExtensionContext;
+		const compact = (options: CompactOptions = {}): void => {
+			compactions += 1;
+			const id = compactions;
+			void (async () => {
+				const before = (await pi.emit(
+					"session_before_compact",
+					{
+						type: "session_before_compact",
+						reason: "manual",
+						willRetry: false,
+						preparation: { firstKeptEntryId: `kept-${id}`, tokensBefore: 195_000 },
+					},
+					context,
+				)) as { compaction?: { summary: string } } | undefined;
+				if (before?.compaction) fragments.push(before.compaction.summary);
+				await pi.emit(
+					"session_compact",
+					{
+						type: "session_compact",
+						fromExtension: true,
+						reason: "manual",
+						willRetry: false,
+						compactionEntry: {
+							type: "compaction",
+							id: `compact-${id}`,
+							parentId: manager.getLeafId(),
+							timestamp: new Date().toISOString(),
+							summary: "handoff",
+							firstKeptEntryId: `kept-${id}`,
+							tokensBefore: 195_000,
+						},
+					},
+					context,
+				);
+				options.onComplete?.({ summary: "handoff", firstKeptEntryId: `kept-${id}`, tokensBefore: 195_000 });
+			})();
+		};
+		context = fakeContext(manager, {
+			abort: vi.fn(),
+			compact,
+			isIdle: () => idle,
+			getSystemPrompt: () => "test prompt",
+			getContextUsage: () => ({ tokens: 195_000, contextWindow: 200_000, percent: 97.5 }),
+		});
+		const sendMessage = pi.sendMessage.bind(pi);
+		vi.spyOn(pi, "sendMessage").mockImplementation((message, options) => {
+			idle = false;
+			sendMessage(message, options);
+		});
+
+		const runPlan = pi.tool("update_plan").execute as Execute;
+		const newContext = pi.tool("new_context").execute as Execute;
+		const openWindow = async (round: number): Promise<void> => {
+			await runPlan(`plan-open-${round}`, { steps: OPEN }, undefined, undefined, context);
+			await runPlan(`plan-done-${round}`, { steps: DONE, progress: PROGRESS }, undefined, undefined, context);
+			await newContext(`reset-${round}`, {}, undefined, undefined, context);
+			const settled = pi.emit("agent_settled", { type: "agent_settled" }, context);
+			await vi.waitFor(() => expect(fragments).toHaveLength(round));
+			idle = true;
+			await pi.emit("agent_settled", { type: "agent_settled" }, context);
+			await settled;
+		};
+
+		await pi.emit("session_start", { type: "session_start" }, context);
+		await pi.emitContext(buildSessionMessages(), context);
+		await pi.emit("before_provider_request", { type: "before_provider_request", payload: {} }, context);
+
+		await openWindow(1);
+		// A steered correction between the two windows bumps the epoch only.
+		await pi.emit(
+			"input",
+			{ type: "input", text: "CORRECTION: take the other approach", streamingBehavior: "steer" },
+			context,
+		);
+		await openWindow(2);
+
+		expect(fragments[0]?.startsWith('<sol-pi-window id="w1" number="1" first="w0" previous="w0">')).toBe(true);
+		expect(fragments[1]?.startsWith('<sol-pi-window id="w2" number="2" first="w0" previous="w1">')).toBe(true);
+
+		const ledger = readFileSync(windowLedgerPath(sessionRoot(root)), "utf8")
+			.trim()
+			.split("\n")
+			.map((line) => JSON.parse(line) as Record<string, unknown>);
+		expect(ledger.map((record) => record.windowId)).toEqual(["w1", "w2"]);
+		expect(ledger.map((record) => record.previousWindowId)).toEqual(["w0", "w1"]);
+	});
 });

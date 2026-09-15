@@ -45,8 +45,8 @@ export type WindowIdentity = {
 };
 
 export type WindowResetInput = {
-	/** Compaction epoch that will begin after this reset (0 is the first window). */
-	readonly epoch: number;
+	/** The window this reset opens; w0 is the session before any compaction. */
+	readonly windowNumber: number;
 	readonly plan: readonly PlanStep[];
 	readonly progress: readonly ProgressSummary[];
 	readonly notesIndex?: readonly string[];
@@ -58,18 +58,23 @@ export type WindowModeInput = {
 };
 
 /**
- * Window identity is derived from the persisted compaction epoch rather than a
- * random identifier: it is deterministic, survives resume/fork, and needs no
- * extra session state.
+ * Window identity is derived from the count of compactions already recorded
+ * rather than a random identifier: it is deterministic, survives resume/fork,
+ * and needs no extra session state.
+ *
+ * The number must advance once per compaction and nothing else. Anything that
+ * also counts context resets without producing a checkpoint would make
+ * `previousWindowId` name a window that never existed, which is worse than no
+ * pointer at all: the model would look for a handoff it cannot find.
  */
-export function windowIdentity(epoch: number): WindowIdentity {
-	if (!Number.isSafeInteger(epoch) || epoch < 0) {
-		throw new Error("Online Context Compact window epoch must be a non-negative safe integer");
+export function windowIdentity(windowNumber: number): WindowIdentity {
+	if (!Number.isSafeInteger(windowNumber) || windowNumber < 0) {
+		throw new Error("Online Context Compact window number must be a non-negative safe integer");
 	}
 	return {
 		firstWindowId: "w0",
-		previousWindowId: epoch > 0 ? `w${epoch - 1}` : null,
-		windowId: `w${epoch}`,
+		previousWindowId: windowNumber > 0 ? `w${windowNumber - 1}` : null,
+		windowId: `w${windowNumber}`,
 	};
 }
 
@@ -83,10 +88,10 @@ export function selectCompactionMode(input: WindowModeInput): CompactionMode {
 }
 
 export function formatWindowFragment(input: WindowResetInput): string {
-	const identity = windowIdentity(input.epoch);
+	const identity = windowIdentity(input.windowNumber);
 	const attributes = [
 		`id="${identity.windowId}"`,
-		`number="${input.epoch}"`,
+		`number="${input.windowNumber}"`,
 		`first="${identity.firstWindowId}"`,
 	];
 	if (identity.previousWindowId !== null) attributes.push(`previous="${identity.previousWindowId}"`);
