@@ -13,6 +13,7 @@ import {
 	type SessionEntry,
 } from "@earendil-works/pi-coding-agent";
 import { formatSavingsCount, showSolPiSavings } from "../../tui.ts";
+import { runtimeRoot } from "../../runtime-paths.ts";
 import {
 	DEFAULT_COMPACTION_ECONOMICS,
 	decideCompaction,
@@ -30,7 +31,16 @@ import {
 	type OnlineState,
 	type ProgressSummary,
 } from "./state.ts";
+import {
+	HISTORY_DEFAULT_LIMIT,
+	HISTORY_MAX_LIMIT,
+	readHistoryEntry,
+	searchHistory,
+} from "./history.ts";
+import { appendNote, listNotes, readNote, readNotesIndex, writeNote } from "./notes.ts";
 import { registerOnlineTools, type PlanUpdateInput } from "./tools.ts";
+import { formatWindowFragment, selectCompactionMode, windowIdentity } from "./window.ts";
+import { appendWindowLedger } from "./window-ledger.ts";
 
 export const DEFAULT_KEEP_RECENT_TOKENS = 20_000;
 export const DEFAULT_NATIVE_SUMMARY_TOKEN_ESTIMATE = 1_000;
@@ -49,6 +59,7 @@ type PendingBoundary = { readonly toolCallId: string };
 type SelectedCompaction = { readonly decision: CompactionDecision };
 type CacheDebt = { readonly debtTokens: number; readonly repaymentTokens: number };
 type PendingContinuation = { readonly promise: Promise<void>; readonly resolve: () => void };
+type PendingReset = { readonly windowNumber: number; readonly fragment: string };
 
 export function resolveKeepRecentTokens(value: number | undefined): number {
 	const resolved = value ?? DEFAULT_KEEP_RECENT_TOKENS;
@@ -164,6 +175,11 @@ export function createOnlineContextCompactExtension(options: OnlineContextCompac
 		let selected: SelectedCompaction | undefined;
 		let activeDebt: CacheDebt | undefined;
 		let nextContinuation: PendingContinuation | undefined;
+		let pendingReset: PendingReset | undefined;
+		// A model-requested window reset. Unlike the economic boundary it does not
+		// depend on a priced decision, but it is still applied at the next idle
+		// settlement so the tool never aborts the turn that called it.
+		let resetRequested = false;
 		let compactionInFlight = false;
 
 		const releaseContinuation = (): void => {
@@ -186,12 +202,23 @@ export function createOnlineContextCompactExtension(options: OnlineContextCompac
 			pendingBoundary = undefined;
 			selected = undefined;
 			activeDebt = undefined;
+			pendingReset = undefined;
+			resetRequested = false;
 			compactionInFlight = false;
 		};
 		const ensureRestored = (context: ExtensionContext): void => {
 			if (!restored) restore(context);
 		};
 		const save = (): void => appendOnlineState(pi, state);
+		// The window fragment may only carry a short note index; a missing or
+		// unreadable notes directory degrades to "no notes" rather than failing.
+		const noteIndex = async (context: ExtensionContext): Promise<readonly string[]> => {
+			try {
+				return await readNotesIndex(runtimeRoot(context));
+			} catch {
+				return [];
+			}
+		};
 		const contextTokens = (context: ExtensionContext): number => {
 			const visible = observedMessages.reduce((total, message) => total + estimateTokens(message), 0);
 			const estimated = visible + tokenEstimate(context.getSystemPrompt());
@@ -226,6 +253,118 @@ export function createOnlineContextCompactExtension(options: OnlineContextCompac
 						plan: steps,
 					},
 				);
+			},
+			noteWrite: async (input) => {
+				ensureRestored(input.context);
+				if (input.signal?.aborted) throw new Error("Note write was aborted");
+				const entry = await writeNote(runtimeRoot(input.context), input.slug, input.body);
+				return result(`Recorded note "${entry.slug}" (${entry.bytes} bytes).`, {
+					op: "write",
+					slug: entry.slug,
+					bytes: entry.bytes,
+					task_status: "active",
+				});
+			},
+			noteAppend: async (input) => {
+				ensureRestored(input.context);
+				if (input.signal?.aborted) throw new Error("Note append was aborted");
+				const entry = await appendNote(runtimeRoot(input.context), input.slug, input.body);
+				return result(`Appended to note "${entry.slug}" (now ${entry.bytes} bytes).`, {
+					op: "append",
+					slug: entry.slug,
+					bytes: entry.bytes,
+					task_status: "active",
+				});
+			},
+			noteRead: async (input) => {
+				ensureRestored(input.context);
+				if (input.signal?.aborted) throw new Error("Note read was aborted");
+				const root = runtimeRoot(input.context);
+				const text = await readNote(root, input.slug);
+				if (text === undefined) {
+					const available = (await listNotes(root)).map((entry) => entry.slug);
+					throw new Error(
+						`No note named "${input.slug}". Available notes: ${available.length > 0 ? available.join(", ") : "(none)"}.`,
+					);
+				}
+				return result(text, {
+					op: "read",
+					slug: input.slug,
+					found: true,
+					bytes: Buffer.byteLength(text, "utf8"),
+				});
+			},
+			newContext: async (input) => {
+				ensureRestored(input.context);
+				if (input.signal?.aborted) throw new Error("Context reset was aborted");
+				resetRequested = true;
+				return result(
+					"Context window reset requested. It is applied once the current turn settles: the recorded plan, progress, and note index become the checkpoint of the new window, and no summarization request is sent.",
+					{ op: "new_context", requested: true, task_status: "active" },
+				);
+			},
+			contextRemaining: async (input) => {
+				ensureRestored(input.context);
+				if (input.signal?.aborted) throw new Error("Context usage read was aborted");
+				const usage = input.context.getContextUsage();
+				const window = validPositiveInteger(usage?.contextWindow) ? usage.contextWindow : null;
+				const tokens = validPositiveInteger(usage?.tokens) ? usage.tokens : contextTokens(input.context);
+				const percent = typeof usage?.percent === "number" ? usage.percent : null;
+				const remaining = window === null ? null : Math.max(0, window - tokens);
+				const text =
+					remaining === null
+						? `Context: ${tokens} tokens used; the context window size is unknown.`
+						: `Context: ${tokens} of ${window} tokens used (${percent === null ? "?" : percent}%), ${remaining} tokens remaining. Use new_context to start a fresh window from the recorded plan, progress, and notes.`;
+				return result(text, {
+					op: "get_context_remaining",
+					tokens,
+					context_window: window,
+					remaining_tokens: remaining,
+					percent,
+					task_status: "active",
+				});
+			},
+			historySearch: async (input) => {
+				ensureRestored(input.context);
+				if (input.signal?.aborted) throw new Error("History search was aborted");
+				const entries = input.context.sessionManager.getEntries();
+				const limit = input.limit ?? HISTORY_DEFAULT_LIMIT;
+				const search = searchHistory(entries, input.query, limit);
+				if (search.total === 0) {
+					return result(`No recorded history matches "${input.query}".`, {
+						op: "history_search",
+						query: input.query,
+						total: 0,
+						hits: [],
+					});
+				}
+				const lines = search.hits.map(
+					(hit) => `- ${hit.id} [${hit.kind}] #${hit.index}: ${hit.snippet}`,
+				);
+				const note = search.truncated
+					? ` (showing ${search.hits.length} of ${search.total}; narrow the query or raise limit up to ${HISTORY_MAX_LIMIT})`
+					: "";
+				return result(
+					`${search.total} matches for "${input.query}"${note}:\n${lines.join("\n")}\nRead one with history_read id.`,
+					{
+						op: "history_search",
+						query: input.query,
+						total: search.total,
+						hits: search.hits.map((hit) => ({ id: hit.id, index: hit.index, kind: hit.kind })),
+					},
+				);
+			},
+			historyRead: async (input) => {
+				ensureRestored(input.context);
+				if (input.signal?.aborted) throw new Error("History read was aborted");
+				const found = readHistoryEntry(input.context.sessionManager.getEntries(), input.id);
+				if (!found) throw new Error(`Unknown history entry id "${input.id}". Use history_search to find an id.`);
+				return result(`[${found.kind}] #${found.index}\n${found.text}`, {
+					op: "history_read",
+					id: input.id,
+					kind: found.kind,
+					bytes: Buffer.byteLength(found.text, "utf8"),
+				});
 			},
 		});
 
@@ -323,15 +462,35 @@ export function createOnlineContextCompactExtension(options: OnlineContextCompac
 				nextContinuation = parentContinuation;
 				return;
 			}
-			if (!pending) {
+			const requestedReset = resetRequested;
+			if (!pending && !requestedReset) {
 				releaseParentContinuation(parentContinuation);
 				return;
 			}
+			if (requestedReset) resetRequested = false;
 
-			activeDebt = {
-				debtTokens: pending.decision.writeTokens * (pending.decision.incrementalCacheCostRatio ?? 0),
-				repaymentTokens: Math.max(0, pending.decision.archiveTokens - pending.decision.memoTokens),
-			};
+			// Windowed handoff: when structured state can rebuild the handoff, hand Pi a
+			// synthetic compaction result so no summarization request is sent. An
+			// explicit reset is honored even without priced savings.
+			if (requestedReset || selectCompactionMode({ plan: state.plan, progress: state.pendingProgress }) === "reset") {
+				const windowNumber = state.epoch + 1;
+				pendingReset = {
+					windowNumber,
+					fragment: formatWindowFragment({
+						epoch: windowNumber,
+						plan: state.plan,
+						progress: state.pendingProgress,
+						notesIndex: await noteIndex(context),
+					}),
+				};
+			}
+
+			activeDebt = pending
+				? {
+						debtTokens: pending.decision.writeTokens * (pending.decision.incrementalCacheCostRatio ?? 0),
+						repaymentTokens: Math.max(0, pending.decision.archiveTokens - pending.decision.memoTokens),
+					}
+				: { debtTokens: 0, repaymentTokens: 0 };
 			let compacted = false;
 			let compactionError: Error | undefined;
 			try {
@@ -350,7 +509,7 @@ export function createOnlineContextCompactExtension(options: OnlineContextCompac
 								compacted = true;
 								const removed = Math.max(
 									0,
-									pending.decision.archiveTokens - tokenEstimate(compaction.summary),
+									(pending?.decision.archiveTokens ?? 0) - tokenEstimate(compaction.summary),
 								);
 								if (removed > 0) {
 									showSolPiSavings(
@@ -411,8 +570,50 @@ export function createOnlineContextCompactExtension(options: OnlineContextCompac
 			} finally {
 				compactionInFlight = false;
 				activeDebt = undefined;
+				pendingReset = undefined;
 				releaseParentContinuation(parentContinuation);
 			}
+		});
+
+		pi.on("session_before_compact", async (event, context) => {
+			const intent = pendingReset;
+			pendingReset = undefined;
+			const windowNumber = intent?.windowNumber ?? state.epoch + 1;
+			const identity = windowIdentity(windowNumber);
+			try {
+				await appendWindowLedger(runtimeRoot(context), {
+					event: intent ? "reset" : "summary",
+					reason: event.reason,
+					windowNumber,
+					windowId: identity.windowId,
+					previousWindowId: identity.previousWindowId,
+					firstKeptEntryId: event.preparation.firstKeptEntryId,
+					tokensBefore: event.preparation.tokensBefore,
+					fragmentBytes: intent ? Buffer.byteLength(intent.fragment, "utf8") : 0,
+					at: new Date().toISOString(),
+				});
+			} catch (error) {
+				// Fail open: an audit-trail problem must never block compaction.
+				const reason = error instanceof Error ? error.message : String(error);
+				console.error(`[onlinecontextcompact] window ledger write failed: ${reason}`);
+			}
+			if (!intent) return;
+			return {
+				compaction: {
+					summary: intent.fragment,
+					firstKeptEntryId: event.preparation.firstKeptEntryId,
+					tokensBefore: event.preparation.tokensBefore,
+					details: {
+						solPiWindow: {
+							version: 1,
+							mode: "reset",
+							windowNumber,
+							windowId: identity.windowId,
+							previousWindowId: identity.previousWindowId,
+						},
+					},
+				},
+			};
 		});
 
 		pi.on("session_compact", (event, context) => {
@@ -425,6 +626,7 @@ export function createOnlineContextCompactExtension(options: OnlineContextCompac
 			pendingBoundary = undefined;
 			selected = undefined;
 			activeDebt = undefined;
+			pendingReset = undefined;
 			observedMessages = buildSessionContext(
 				context.sessionManager.getEntries(),
 				context.sessionManager.getLeafId(),
@@ -436,6 +638,8 @@ export function createOnlineContextCompactExtension(options: OnlineContextCompac
 			pendingBoundary = undefined;
 			selected = undefined;
 			activeDebt = undefined;
+			pendingReset = undefined;
+			resetRequested = false;
 			compactionInFlight = false;
 		});
 	};

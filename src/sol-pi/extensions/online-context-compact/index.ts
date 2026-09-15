@@ -37,7 +37,51 @@ export {
 	type OnlineState,
 	type ProgressSummary,
 } from "./state.ts";
-export type { PlanProgress, PlanUpdateInput } from "./tools.ts";
+export type {
+	ContextToolInput,
+	HistoryReadInput,
+	HistorySearchInput,
+	NoteReadInput,
+	NoteWriteInput,
+	PlanProgress,
+	PlanUpdateInput,
+} from "./tools.ts";
+export {
+	HISTORY_DEFAULT_LIMIT,
+	HISTORY_HINT_MAX_BYTES,
+	HISTORY_MAX_LIMIT,
+	HISTORY_READ_MAX_BYTES,
+	HISTORY_TRUNCATION_MARKER,
+	readHistoryEntry,
+	searchHistory,
+	type HistoryHit,
+	type HistorySearch,
+} from "./history.ts";
+export {
+	appendNote,
+	formatNoteIndexLine,
+	listNotes,
+	NOTE_INDEX_MAX_BYTES,
+	NOTE_MAX_BYTES,
+	notePath,
+	notesDirectory,
+	readNote,
+	readNotesIndex,
+	writeNote,
+	type NoteEntry,
+} from "./notes.ts";
+export {
+	formatWindowFragment,
+	selectCompactionMode,
+	WINDOW_CONTINUITY_INSTRUCTION,
+	WINDOW_FRAGMENT_MAX_BYTES,
+	windowIdentity,
+	type CompactionMode,
+	type WindowIdentity,
+	type WindowModeInput,
+	type WindowResetInput,
+} from "./window.ts";
+export { appendWindowLedger, windowLedgerPath, type WindowLedgerRecord } from "./window-ledger.ts";
 
 export function registerOnlineContextCompact(
 	pi: ExtensionAPI,

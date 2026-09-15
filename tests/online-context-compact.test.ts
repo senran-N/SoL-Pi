@@ -59,12 +59,22 @@ describe("Online Context Compact extension", () => {
 	it("registers one tool and only public Pi lifecycle hooks", () => {
 		const pi = new FakePi();
 		registerOnlineContextCompact(pi.asExtensionApi());
-		expect(pi.registeredTools.map((tool) => tool.name)).toEqual(["update_plan"]);
+		expect(pi.registeredTools.map((tool) => tool.name)).toEqual([
+			"update_plan",
+			"note_write",
+			"note_append",
+			"note_read",
+			"get_context_remaining",
+			"new_context",
+			"history_search",
+			"history_read",
+		]);
 		expect([...pi.handlers.keys()].sort()).toEqual([
 			"agent_settled",
 			"before_provider_request",
 			"context",
 			"input",
+			"session_before_compact",
 			"session_before_tree",
 			"session_compact",
 			"session_shutdown",
