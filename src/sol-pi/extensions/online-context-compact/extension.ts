@@ -210,6 +210,11 @@ export function createOnlineContextCompactExtension(options: OnlineContextCompac
 			if (!restored) restore(context);
 		};
 		const save = (): void => appendOnlineState(pi, state);
+		// Window numbers count compactions, not context resets. `state.epoch` also
+		// advances on a correction, which rebuilds the plan without producing a
+		// checkpoint, so numbering windows by it would leave gaps and point each
+		// fragment at a predecessor that never existed.
+		const nextWindowNumber = (): number => state.nativeCompactionCount + 1;
 		// The window fragment may only carry a short note index; a missing or
 		// unreadable notes directory degrades to "no notes" rather than failing.
 		const noteIndex = async (context: ExtensionContext): Promise<readonly string[]> => {
@@ -492,11 +497,11 @@ export function createOnlineContextCompactExtension(options: OnlineContextCompac
 			// synthetic compaction result so no summarization request is sent. An
 			// explicit reset is honored even without priced savings.
 			if (requestedReset || selectCompactionMode({ plan: state.plan, progress: state.pendingProgress }) === "reset") {
-				const windowNumber = state.epoch + 1;
+				const windowNumber = nextWindowNumber();
 				pendingReset = {
 					windowNumber,
 					fragment: formatWindowFragment({
-						epoch: windowNumber,
+						windowNumber,
 						plan: state.plan,
 						progress: state.pendingProgress,
 						notesIndex: await noteIndex(context),
@@ -600,7 +605,7 @@ export function createOnlineContextCompactExtension(options: OnlineContextCompac
 		pi.on("session_before_compact", async (event, context) => {
 			const intent = pendingReset;
 			pendingReset = undefined;
-			const windowNumber = intent?.windowNumber ?? state.epoch + 1;
+			const windowNumber = intent?.windowNumber ?? nextWindowNumber();
 			const identity = windowIdentity(windowNumber);
 			try {
 				await appendWindowLedger(runtimeRoot(context), {
