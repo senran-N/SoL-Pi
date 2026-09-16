@@ -29,6 +29,7 @@ const EVIDENCE_REDUCER_RECEIPT_PREFIX = "sol_pi_evidence_receipt_v1";
 
 export interface Observation {
 	readonly id: string;
+	readonly isError: boolean;
 	readonly contentHash: string;
 	readonly filePath: string;
 	readonly toolName: string;
@@ -64,10 +65,16 @@ function countBufferLines(buffer: Buffer): number {
 	return lines;
 }
 
-export function isPureTextResult(message: AgentMessage): message is ToolResultMessage {
+/**
+ * A failed result is packable too. The window fills up fastest exactly when
+ * something is broken - a failing test run, a stack trace, a type-check dump -
+ * so excluding errors switched the mechanism off in the situation that needs it
+ * most. The placeholder keeps saying the call failed, and the error text stays
+ * recallable byte for byte.
+ */
+export function isPackableTextResult(message: AgentMessage): message is ToolResultMessage {
 	return (
 		message.role === "toolResult" &&
-		!message.isError &&
 		message.content.length > 0 &&
 		message.content.every((block) => block.type === "text")
 	);
@@ -106,6 +113,7 @@ export function createObservation(message: ToolResultMessage, runtimeRoot: strin
 	const id = `obs_${hash(`${message.toolName}\0${message.toolCallId}\0${contentHash}`).slice(0, 24)}`;
 	return {
 		id,
+		isError: message.isError === true,
 		contentHash,
 		filePath: observationPath(runtimeRoot, id),
 		toolName: message.toolName,
@@ -181,9 +189,10 @@ export function placeholderFor(observation: Observation): string {
 	const head = completeLineExcerpt(observation.text, headBudget, false);
 	const tail = completeLineExcerpt(observation.text, tailBudget, true);
 	return [
-		`[large tool result replaced after its first ${FULL_SENDS} provider requests]`,
+		`[large ${observation.isError ? "failed " : ""}tool result replaced after its first ${FULL_SENDS} provider requests]`,
 		`id: ${observation.id}`,
 		`tool: ${observation.toolName}`,
+		`outcome: ${observation.isError ? "error" : "ok"}`,
 		`original_bytes: ${observation.bytes}`,
 		`original_lines: ${observation.lines}`,
 		`estimated_tokens: ${observation.tokens}`,

@@ -325,10 +325,33 @@ describe("observation pack", () => {
 		expect(result).toMatchObject({ details: { patch: "preserved" }, isError: false });
 	});
 
-	it("passes through errors, mixed content, and reducer receipts", async () => {
+	it("packs a large failed result, and keeps the error text recallable", async () => {
+		const sessionDir = await sessionRoot();
+		const body = `compiling module\n${repeatPastThreshold("at frame\n")}error: build failed\n`;
+		const message = toolResult(body, { isError: true });
+		const pi = observationPackPi();
+		const projected = await project(pi, message, sessionDir, 3);
+
+		expect(projected[0]).toBe(body);
+		expect(projected[1]).toBe(body);
+		expect(projected[2]).toMatch(/^\[large failed tool result replaced/u);
+		expect(projected[2]).toContain("outcome: error");
+		// The head and tail of a failed run are where the diagnosis lives.
+		expect(projected[2]).toContain("compiling module");
+		expect(projected[2]).toContain("error: build failed");
+
+		// The call still reads as failed; only its payload moved out of the window.
+		const replaced = (await pi.emitContext([message], fakeContext(sessionDir)))[0];
+		expect(replaced).toMatchObject({ isError: true });
+
+		const id = projected[2]?.match(/id: (obs_[a-f0-9]{24})/u)?.[1];
+		expect(id).toBeTruthy();
+		expect(await readFile(observationPath(sessionDir, id!), "utf8")).toBe(body);
+	});
+
+	it("passes through mixed content and reducer receipts", async () => {
 		const sessionDir = await sessionRoot();
 		const large = "x".repeat(THRESHOLD_BYTES + 100);
-		const error = toolResult(large, { isError: true });
 		const mixed = toolResult(large, {
 			content: [
 				{ type: "text", text: large },
@@ -344,7 +367,6 @@ describe("observation pack", () => {
 			],
 		});
 
-		expect(await project(observationPackPi(), error, sessionDir, 3)).toEqual([large, large, large]);
 		expect(await project(observationPackPi(), mixed, sessionDir, 3)).toEqual([large, large, large]);
 		const receiptText = resultText(receipt);
 		expect(await project(observationPackPi(), receipt, sessionDir, 3)).toEqual([receiptText, receiptText, receiptText]);

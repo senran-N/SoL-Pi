@@ -24,7 +24,7 @@ import { describe, expect, it } from "vitest";
 import {
 	BOUNDARY_COMPACTION_INSTRUCTIONS,
 	createOnlineContextCompactExtension,
-	POST_COMPACTION_PLAN_REMINDER,
+	formatPostCompactionContinuation,
 } from "../src/sol-pi/extensions/online-context-compact/extension.ts";
 
 const OPEN = [{ id: "build", goal: "build it", status: "in_progress" }] as const;
@@ -150,7 +150,8 @@ async function runCompactionScenario(requestedCompactions: 1 | 2): Promise<void>
 				(entry) =>
 					entry.type === "custom_message" &&
 					entry.customType === "sol-pi-online-context-compact" &&
-					entry.content === POST_COMPACTION_PLAN_REMINDER &&
+					// PROGRESS recorded src/a.ts, so the continuation names it.
+					entry.content === formatPostCompactionContinuation(["src/a.ts"]) &&
 					entry.display === false,
 			),
 		).toHaveLength(requestedCompactions);

@@ -8,14 +8,16 @@ SoL-Pi is a Pi extension. It runs with the filesystem, process, network, and cre
 - ObservationPack stores large tool results under Pi's session directory.
 - Evidence-Preserving Reducer archives diagnostic logs locally and, when explicitly enabled, sends eligible logs through the configured reducer model using Pi-managed authentication.
 - The reducer skips text matching its likely-secret detector, but that detector is a precaution rather than a complete secret scanner. Do not enable remote reduction for workloads whose logs must remain local.
+- Scoped Exploration, when explicitly enabled, reads project files and sends the parts the explorer selects to the configured explorer model using Pi-managed authentication. It is read-only and confined to the project root, but it is not a secrets filter: a file the explorer reads can reach that model. Do not enable it for checkouts whose contents must remain local.
+- Scoped Exploration writes a full transcript of every exploration, including the text it read, under the session directory.
 - Online Context Compact stores plan and compaction state in Pi's session log; see below.
 - Project-local `.pi/sol-pi.json` files should be used only in trusted repositories.
 
 ## Online Context Compact data
 
-Online Context Compact is off by default. When enabled, every `update_plan` call appends a versioned custom state entry to Pi's session log. The latest valid entry holds the model-authored plan, concise progress fields, request counts, token-growth estimates, and compaction debt. These values can include paths, command names, and design notes and should be treated as sensitive as the rest of the conversation. After a successful compaction, the extension also writes one hidden, generic custom message that tells the assistant to rebuild its plan; the reminder contains no task-specific data.
+Online Context Compact is off by default. When enabled, every `update_plan` call appends a versioned custom state entry to Pi's session log. The latest valid entry holds the model-authored plan, concise progress fields, request counts, token-growth estimates, and compaction debt. These values can include paths, command names, and design notes and should be treated as sensitive as the rest of the conversation. After a successful compaction, the extension also writes one hidden custom message that tells the assistant to rebuild its plan. That message names the files the recorded progress already reported as changed, so it carries project paths - and only paths that the plan state already held.
 
-The extension creates no sidecar, attestation, payload-capture, or research-instrumentation files. State entries do not enter the model context; only the generic post-compaction reminder does. Deleting the Pi session removes both kinds of persisted Online Context Compact data.
+The extension creates no sidecar, attestation, payload-capture, or research-instrumentation files. State entries do not enter the model context; only the post-compaction continuation does, and a window handoff carries the plan, the progress record, the note index, and the user's own task and latest instruction quoted verbatim. Deleting the Pi session removes both kinds of persisted Online Context Compact data.
 
 Evidence-Preserving Reducer may temporarily read an overlong bash result from outside its session archive. It accepts only a regular, non-symlink `pi-bash-*.log` file directly inside the operating system's temporary directory and copies eligible content into the session-specific archive before any nested model call.
 

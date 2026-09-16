@@ -11,7 +11,8 @@ export type SolPiTuiMechanism =
 	| "Observation Pack"
 	| "Luna Delegating"
 	| "Online Context Compact"
-	| "Command Yield";
+	| "Command Yield"
+	| "Scoped Exploration";
 
 const STATUS_KEY = "sol-pi-savings";
 const STATUS_DURATION_MS = 4_000;

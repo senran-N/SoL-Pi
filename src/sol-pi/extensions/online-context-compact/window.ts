@@ -13,6 +13,7 @@
  *
  * Pure functions only; the extension wires them to Pi's lifecycle.
  */
+import { DIRECTIVE_MAX_LINE_BYTES, type UserDirectives } from "./directives.ts";
 import type { PlanStep } from "./plan.ts";
 import type { ProgressSummary } from "./state.ts";
 
@@ -33,6 +34,13 @@ const MAX_LINE_BYTES = 512;
  */
 const PROGRESS_RESERVED_BYTES = 1_536;
 const NOTES_INDEX_RESERVED_BYTES = 1_152;
+/**
+ * The plan needs a floor of its own now that a section sits in front of it.
+ * Without one it is the only unreserved section, so every byte the quoted user
+ * instructions take comes straight out of the remaining work list - which is
+ * precisely what the next window steers by.
+ */
+const PLAN_RESERVED_BYTES = 576;
 /** A blank separator plus the section heading; a heading alone is noise. */
 const SECTION_HEADING_LINES = 2;
 
@@ -50,6 +58,8 @@ export type WindowResetInput = {
 	readonly plan: readonly PlanStep[];
 	readonly progress: readonly ProgressSummary[];
 	readonly notesIndex?: readonly string[];
+	/** The user's own words, quoted rather than summarized. */
+	readonly directives?: UserDirectives;
 };
 
 export type WindowModeInput = {
@@ -99,7 +109,8 @@ export function formatWindowFragment(input: WindowResetInput): string {
 	const close = `</${WINDOW_TAG}>`;
 
 	return renderFragment(open, close, sanitize(WINDOW_CONTINUITY_INSTRUCTION), [
-		{ lines: planLines(input.plan), reservedBytes: 0 },
+		{ lines: directiveLines(input.directives), reservedBytes: 0 },
+		{ lines: planLines(input.plan), reservedBytes: PLAN_RESERVED_BYTES },
 		{ lines: progressLines(input.progress), reservedBytes: PROGRESS_RESERVED_BYTES },
 		{ lines: notesLines(input.notesIndex ?? []), reservedBytes: NOTES_INDEX_RESERVED_BYTES },
 	]);
@@ -107,6 +118,22 @@ export function formatWindowFragment(input: WindowResetInput): string {
 
 type Section = { readonly lines: readonly string[]; readonly reservedBytes: number };
 type FittedSection = { readonly kept: readonly string[]; readonly used: number; readonly truncated: boolean };
+
+/**
+ * First section, and deliberately so. The plan, the progress and the notes can
+ * all be rebuilt by the model from what it is about to read; the sentence the
+ * user actually typed cannot be rebuilt from anything. Being first means it is
+ * filled before any other section can spend the budget.
+ */
+function directiveLines(directives: UserDirectives | undefined): readonly string[] {
+	if (!directives) return [];
+	const task = directives.task ? sanitize(directives.task, DIRECTIVE_MAX_LINE_BYTES) : "";
+	const latest = directives.latest ? sanitize(directives.latest, DIRECTIVE_MAX_LINE_BYTES) : "";
+	const lines = ["", "User instructions (verbatim):"];
+	if (task.length > 0) lines.push(`- task: ${task}`);
+	if (latest.length > 0) lines.push(`- latest: ${latest}`);
+	return lines.length > SECTION_HEADING_LINES ? lines : [];
+}
 
 function planLines(plan: readonly PlanStep[]): readonly string[] {
 	if (plan.length === 0) return [];

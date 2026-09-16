@@ -10,6 +10,7 @@ import { registerCommandYield } from "./extensions/command-yield/index.ts";
 import { registerEvidencePreservingReducer } from "./extensions/evidence-preserving-reducer/index.ts";
 import { registerObservationPack } from "./extensions/observation-pack/index.ts";
 import { registerOnlineContextCompact } from "./extensions/online-context-compact/index.ts";
+import { registerScopedExploration } from "./extensions/scoped-exploration/index.ts";
 
 export function registerConfiguredFeatures(pi: ExtensionAPI, config: SolPiConfig): void {
 	/*
@@ -31,6 +32,13 @@ export function registerConfiguredFeatures(pi: ExtensionAPI, config: SolPiConfig
 		});
 	}
 	if (config.onlineContextCompact) registerOnlineContextCompact(pi, config.cacheWriteReadRatio);
+	if (config.scopedExploration) {
+		registerScopedExploration(pi, {
+			explorerModel: config.scopedExplorationModel,
+			explorerProvider: config.scopedExplorationProvider,
+			maxSteps: config.scopedExplorationMaxSteps,
+		});
+	}
 }
 
 export type SolPiConfigLoader = (ctx: ExtensionContext) => SolPiConfig;

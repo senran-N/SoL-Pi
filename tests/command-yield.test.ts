@@ -309,6 +309,7 @@ describe("Command Yield with the other mechanisms", () => {
 		const handle = registry.list()[0]?.id ?? "";
 		const observation = {
 			id: "obs_0123456789abcdef01234567",
+			isError: false,
 			contentHash: "hash",
 			filePath: "/tmp/obs",
 			toolName: "bash",

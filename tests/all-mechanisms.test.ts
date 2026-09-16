@@ -60,7 +60,7 @@ describe("SoL-Pi entrypoint", () => {
 		expect(pi.handlers.size).toBe(0);
 	});
 
-	it("registers all five standalone mechanisms from one config", () => {
+	it("registers all six standalone mechanisms from one config", () => {
 		const pi = new FakePi();
 		registerConfiguredFeatures(pi.asExtensionApi(), {
 			...DEFAULT_CONFIG,
@@ -69,6 +69,7 @@ describe("SoL-Pi entrypoint", () => {
 			evidencePreservingReducer: true,
 			onlineContextCompact: true,
 			commandYield: true,
+			scopedExploration: true,
 		});
 
 		expect(pi.registeredTools.map((tool) => tool.name)).toEqual([
@@ -87,6 +88,7 @@ describe("SoL-Pi entrypoint", () => {
 			"new_context",
 			"history_search",
 			"history_read",
+			"explore",
 		]);
 		expect([...pi.handlers.keys()].sort()).toEqual([
 			"agent_settled",

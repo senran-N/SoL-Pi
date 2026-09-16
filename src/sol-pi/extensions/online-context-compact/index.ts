@@ -16,13 +16,21 @@ export {
 } from "./economics.ts";
 export {
 	BOUNDARY_COMPACTION_INSTRUCTIONS,
+	CONTINUATION_FILES_MAX,
 	createOnlineContextCompactExtension,
 	DEFAULT_KEEP_RECENT_TOKENS,
 	DEFAULT_NATIVE_SUMMARY_TOKEN_ESTIMATE,
+	formatPostCompactionContinuation,
 	POST_COMPACTION_PLAN_REMINDER,
 	type OnlineContextCompactOptions,
+	recentChangedFiles,
 	resolveKeepRecentTokens,
 } from "./extension.ts";
+export {
+	collectUserDirectives,
+	DIRECTIVE_MAX_LINE_BYTES,
+	type UserDirectives,
+} from "./directives.ts";
 export {
 	analyzePlanTransition,
 	formatPlanSnapshot,

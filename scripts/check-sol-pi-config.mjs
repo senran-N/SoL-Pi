@@ -12,6 +12,7 @@ const FEATURE_KEYS = [
 	"evidencePreservingReducer",
 	"onlineContextCompact",
 	"commandYield",
+	"scopedExploration",
 ];
 const DEFAULT_CACHE_WRITE_READ_RATIO = 12.5;
 const DEFAULT_COMMAND_YIELD_TIME_MS = 10_000;
@@ -19,13 +20,24 @@ const MIN_YIELD_TIME_MS = 1_000;
 const MAX_YIELD_TIME_MS = 300_000;
 const DEFAULT_EPR_REDUCER_PROVIDER = ["openai", "codex"].join("-");
 const DEFAULT_EPR_REDUCER_MODEL = ["gpt-5.6", "luna"].join("-");
-const STRING_KEYS = ["evidencePreservingReducerModel", "evidencePreservingReducerProvider"];
+const DEFAULT_EXPLORER_PROVIDER = DEFAULT_EPR_REDUCER_PROVIDER;
+const DEFAULT_EXPLORER_MODEL = DEFAULT_EPR_REDUCER_MODEL;
+const DEFAULT_EXPLORATION_MAX_STEPS = 8;
+const MIN_EXPLORATION_MAX_STEPS = 1;
+const MAX_EXPLORATION_MAX_STEPS = 32;
+const STRING_KEYS = [
+	"evidencePreservingReducerModel",
+	"evidencePreservingReducerProvider",
+	"scopedExplorationModel",
+	"scopedExplorationProvider",
+];
 const CONFIG_KEYS = new Set([
 	"version",
 	...FEATURE_KEYS,
 	...STRING_KEYS,
 	"cacheWriteReadRatio",
 	"commandYieldTimeMs",
+	"scopedExplorationMaxSteps",
 ]);
 
 function fail(message) {
@@ -107,6 +119,20 @@ function validateConfig(value, requireAllEnabled) {
 		fail(`commandYieldTimeMs must be an integer between ${MIN_YIELD_TIME_MS} and ${MAX_YIELD_TIME_MS}`);
 	}
 	effective.commandYieldTimeMs = commandYieldTimeMs;
+	const scopedExplorationMaxSteps = Object.hasOwn(value, "scopedExplorationMaxSteps")
+		? value.scopedExplorationMaxSteps
+		: DEFAULT_EXPLORATION_MAX_STEPS;
+	if (
+		typeof scopedExplorationMaxSteps !== "number" ||
+		!Number.isInteger(scopedExplorationMaxSteps) ||
+		scopedExplorationMaxSteps < MIN_EXPLORATION_MAX_STEPS ||
+		scopedExplorationMaxSteps > MAX_EXPLORATION_MAX_STEPS
+	) {
+		fail(
+			`scopedExplorationMaxSteps must be an integer between ${MIN_EXPLORATION_MAX_STEPS} and ${MAX_EXPLORATION_MAX_STEPS}`,
+		);
+	}
+	effective.scopedExplorationMaxSteps = scopedExplorationMaxSteps;
 	effective.evidencePreservingReducerModel = stringConfigValue(
 		value,
 		"evidencePreservingReducerModel",
@@ -116,6 +142,12 @@ function validateConfig(value, requireAllEnabled) {
 		value,
 		"evidencePreservingReducerProvider",
 		DEFAULT_EPR_REDUCER_PROVIDER,
+	);
+	effective.scopedExplorationModel = stringConfigValue(value, "scopedExplorationModel", DEFAULT_EXPLORER_MODEL);
+	effective.scopedExplorationProvider = stringConfigValue(
+		value,
+		"scopedExplorationProvider",
+		DEFAULT_EXPLORER_PROVIDER,
 	);
 
 	return {

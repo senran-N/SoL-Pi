@@ -7,9 +7,12 @@ import type { CompactOptions, ExtensionContext } from "@earendil-works/pi-coding
 import { describe, expect, it, vi } from "vitest";
 import {
 	BOUNDARY_COMPACTION_INSTRUCTIONS,
+	CONTINUATION_FILES_MAX,
 	createOnlineContextCompactExtension,
 	DEFAULT_KEEP_RECENT_TOKENS,
+	formatPostCompactionContinuation,
 	POST_COMPACTION_PLAN_REMINDER,
+	recentChangedFiles,
 	registerOnlineContextCompact,
 	resolveKeepRecentTokens,
 } from "../src/sol-pi/extensions/online-context-compact/index.ts";
@@ -205,7 +208,8 @@ describe("Online Context Compact extension", () => {
 			{
 				message: {
 					customType: "sol-pi-online-context-compact",
-					content: POST_COMPACTION_PLAN_REMINDER,
+					// The recorded progress named src/a.ts, so the continuation carries it.
+					content: formatPostCompactionContinuation(["src/a.ts"]),
 					display: false,
 				},
 				options: { triggerTurn: true },

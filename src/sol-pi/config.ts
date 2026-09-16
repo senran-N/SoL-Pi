@@ -15,6 +15,13 @@ import {
 	DEFAULT_REDUCER_MODEL,
 	DEFAULT_REDUCER_PROVIDER,
 } from "./extensions/evidence-preserving-reducer/config.ts";
+import {
+	DEFAULT_EXPLORER_MODEL,
+	DEFAULT_EXPLORER_PROVIDER,
+	DEFAULT_MAX_STEPS,
+	MAX_MAX_STEPS,
+	MIN_MAX_STEPS,
+} from "./extensions/scoped-exploration/config.ts";
 
 export const DEFAULT_CACHE_WRITE_READ_RATIO = 12.5;
 
@@ -28,6 +35,10 @@ export interface SolPiConfig {
 	readonly onlineContextCompact: boolean;
 	readonly commandYield: boolean;
 	readonly commandYieldTimeMs: number;
+	readonly scopedExploration: boolean;
+	readonly scopedExplorationModel: string;
+	readonly scopedExplorationProvider: string;
+	readonly scopedExplorationMaxSteps: number;
 	readonly cacheWriteReadRatio: number;
 }
 
@@ -41,6 +52,10 @@ export const DEFAULT_CONFIG: SolPiConfig = Object.freeze({
 	onlineContextCompact: false,
 	commandYield: false,
 	commandYieldTimeMs: DEFAULT_COMMAND_YIELD_TIME_MS,
+	scopedExploration: false,
+	scopedExplorationModel: DEFAULT_EXPLORER_MODEL,
+	scopedExplorationProvider: DEFAULT_EXPLORER_PROVIDER,
+	scopedExplorationMaxSteps: DEFAULT_MAX_STEPS,
 	cacheWriteReadRatio: DEFAULT_CACHE_WRITE_READ_RATIO,
 });
 
@@ -50,14 +65,21 @@ const FEATURE_KEYS = [
 	"evidencePreservingReducer",
 	"onlineContextCompact",
 	"commandYield",
+	"scopedExploration",
 ] as const;
-const STRING_KEYS = ["evidencePreservingReducerModel", "evidencePreservingReducerProvider"] as const;
+const STRING_KEYS = [
+	"evidencePreservingReducerModel",
+	"evidencePreservingReducerProvider",
+	"scopedExplorationModel",
+	"scopedExplorationProvider",
+] as const;
 const CONFIG_KEYS = new Set<string>([
 	"version",
 	...FEATURE_KEYS,
 	...STRING_KEYS,
 	"cacheWriteReadRatio",
 	"commandYieldTimeMs",
+	"scopedExplorationMaxSteps",
 ]);
 
 export function findConfigPath(
@@ -128,6 +150,19 @@ export function loadSolPiConfig(
 			`SoL-Pi config commandYieldTimeMs must be an integer between ${MIN_YIELD_TIME_MS} and ${MAX_YIELD_TIME_MS}: ${path}`,
 		);
 	}
+	const scopedExplorationMaxSteps = Object.hasOwn(record, "scopedExplorationMaxSteps")
+		? record.scopedExplorationMaxSteps
+		: DEFAULT_MAX_STEPS;
+	if (
+		typeof scopedExplorationMaxSteps !== "number" ||
+		!Number.isInteger(scopedExplorationMaxSteps) ||
+		scopedExplorationMaxSteps < MIN_MAX_STEPS ||
+		scopedExplorationMaxSteps > MAX_MAX_STEPS
+	) {
+		throw new Error(
+			`SoL-Pi config scopedExplorationMaxSteps must be an integer between ${MIN_MAX_STEPS} and ${MAX_MAX_STEPS}: ${path}`,
+		);
+	}
 	const evidencePreservingReducerModel = stringConfigValue(
 		record,
 		"evidencePreservingReducerModel",
@@ -140,6 +175,13 @@ export function loadSolPiConfig(
 		DEFAULT_REDUCER_PROVIDER,
 		path,
 	);
+	const scopedExplorationModel = stringConfigValue(record, "scopedExplorationModel", DEFAULT_EXPLORER_MODEL, path);
+	const scopedExplorationProvider = stringConfigValue(
+		record,
+		"scopedExplorationProvider",
+		DEFAULT_EXPLORER_PROVIDER,
+		path,
+	);
 
 	return Object.freeze({
 		...DEFAULT_CONFIG,
@@ -148,6 +190,9 @@ export function loadSolPiConfig(
 		commandYieldTimeMs,
 		evidencePreservingReducerModel,
 		evidencePreservingReducerProvider,
+		scopedExplorationMaxSteps,
+		scopedExplorationModel,
+		scopedExplorationProvider,
 	}) as SolPiConfig;
 }
 

@@ -8,5 +8,9 @@
 	"onlineContextCompact": false,
 	"commandYield": false,
 	"commandYieldTimeMs": 10000,
+	"scopedExploration": false,
+	"scopedExplorationProvider": "provider-id",
+	"scopedExplorationModel": "model-id",
+	"scopedExplorationMaxSteps": 8,
 	"cacheWriteReadRatio": 12.5
 }

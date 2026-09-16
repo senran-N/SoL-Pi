@@ -31,7 +31,7 @@ import {
 	estimateTokens,
 	FULL_SENDS,
 	isObservationId,
-	isPureTextResult,
+	isPackableTextResult,
 	observationPath,
 	placeholderFor,
 	type RecallChunk,
@@ -150,7 +150,7 @@ export function createObservationPackExtension(): ExtensionFactory {
 			const requestIndex = assistantCount + 1;
 			for (let index = 0; index < event.messages.length; index += 1) {
 				const message = event.messages[index];
-				if (!message || !isPureTextResult(message)) continue;
+				if (!message || !isPackableTextResult(message)) continue;
 
 				try {
 					const observation = createObservation(message, root);
@@ -168,6 +168,7 @@ export function createObservationPackExtension(): ExtensionFactory {
 							originalBytes: observation.bytes,
 							originalLines: observation.lines,
 							originalTokens: observation.tokens,
+							isError: observation.isError,
 							contentHash: observation.contentHash,
 						});
 						sentCounts.set(sendCountKey, previousSends + 1);
@@ -186,6 +187,7 @@ export function createObservationPackExtension(): ExtensionFactory {
 						originalBytes: observation.bytes,
 						originalLines: observation.lines,
 						originalTokens: observation.tokens,
+						isError: observation.isError,
 						placeholderBytes: Buffer.byteLength(placeholder, "utf8"),
 						placeholderTokens,
 						removedTokens,
@@ -214,6 +216,7 @@ export function createObservationPackExtension(): ExtensionFactory {
 export {
 	createObservation,
 	FULL_SENDS,
+	isPackableTextResult,
 	type Observation,
 	PLACEHOLDER_EXCERPT_BYTES,
 	placeholderFor,

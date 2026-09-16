@@ -25,6 +25,12 @@ The queue covers only fused operations registered by this SoL-Pi instance. Exter
 
 ObservationPack changes only the messages projected through the public `context` event. Stored session history remains intact. Original bytes and the JSONL ledger live under the session-derived SoL-Pi directory.
 
+A failed tool result participates on the same terms as a successful one. The window fills fastest exactly when something is broken, so a large failing test run or stack trace is packed rather than replayed; the projected result keeps its error flag, the placeholder states the call failed, and the diagnostic text stays recallable byte for byte through `obs_recall`. Mixed-content results and reducer receipts are still passed through untouched.
+
+## Scoped Exploration
+
+Scoped Exploration registers one tool and no event handlers, so it changes nothing about how Pi assembles context. Its nested call resolves the configured explorer provider/model through Pi's model registry on the same path Evidence-Preserving Reducer uses, including the fallback for a build whose registry exposes no `complete()` method. Its filesystem access is its own: three read-only primitives bounded to the project root, never Pi's tools, so an exploration cannot write, run a command, or reach outside the checkout regardless of the surrounding approval mode.
+
 ## Evidence-Preserving Reducer
 
 The reducer handles public `tool_result` events and resolves the configured reducer provider/model through Pi's model registry before calling `ExtensionContext.modelRegistry.complete()` when available. For the Pi 0.81.1 fork, which exposes no registry `complete()` method, it resolves authentication for that reducer model through `getApiKeyAndHeaders()` and calls the shared `@earendil-works/pi-ai/compat` completion API. The reducer preserves the original result whenever the configured reducer model is unavailable or eligibility, model-call, schema, source-hash, exact-quote, size, or likely-secret checks fail.

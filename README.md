@@ -33,15 +33,18 @@ The standalone release contains four mechanisms that survived that process. They
 
 A fifth mechanism, Command Yield, addresses a different failure. Pi's shell tool has no default timeout, so a command that crashed without exiting, deadlocked, or blocked on stdin holds the turn open until someone interrupts it. Command Yield gives the foreground a deadline without giving the command a kill.
 
+A sixth mechanism, Scoped Exploration, addresses what the others cannot reach. Finding out where something lives is cheap to do and expensive to keep: the files opened on the way to a one-line conclusion stay in the window for the rest of the session, and no later compaction can separate them from the work that mattered. Scoped Exploration answers such a question in a context that is thrown away, and returns the conclusion with the exact lines it rests on.
+
 ## What SoL-Pi Adds
 
 | Area | Mechanism | What changes |
 |---|---|---|
 | Tools | **Action Fusion** | An edit or write can run its follow-up validation command in the same tool call. |
-| Observations | **ObservationPack** | Repeated large text results become stable handles with exact paged recall. |
+| Observations | **ObservationPack** | Repeated large text results, successful or failed, become stable handles with exact paged recall. |
 | Delegation | **Evidence-Preserving Reducer** | Long diagnostic logs become compact receipts only when every retained quotation matches the archived source. |
 | Context | **Online Context Compact** | Completed plan steps become candidate points for Pi's native compaction, subject to economic and window-pressure checks; after a successful compaction, Pi continues the task in a new turn. |
 | Commands | **Command Yield** | A command that outlives its foreground deadline returns what it printed plus a live handle, and keeps running; `exec_wait` collects only what it prints next. |
+| Exploration | **Scoped Exploration** | `explore` answers one question about the project in a separate, discarded context and returns a short answer whose every citation is checked against the file before delivery. |
 
 The mechanisms share four rules:
 
@@ -115,12 +118,13 @@ For the complete schema, see [Configuration](docs/configuration.md). Coding agen
 
 ## Storage and Security
 
-ObservationPack and Evidence-Preserving Reducer store session-specific archives under:
+ObservationPack, Evidence-Preserving Reducer, and Scoped Exploration store session-specific archives under:
 
 ```text
 <session-directory>/sol-pi/<session-id>/
 ├── observation-pack/
-└── evidence-preserving-reducer/
+├── evidence-preserving-reducer/
+└── scoped-exploration/
 ```
 
 They archive eligible source material in this directory. The archived copies remain local and are not automatically deleted when the Pi session ends.
@@ -129,7 +133,7 @@ Command Yield writes nothing to disk. A yielded command's output is held in memo
 
 Online Context Compact stores its state in Pi's session log. After a successful compaction, it starts a new turn and automatically continues the active task. Cancelling the run or exiting Pi does not trigger automatic continuation.
 
-Evidence-Preserving Reducer may send eligible diagnostic-log content to its configured reducer model using Pi-managed authentication. Review [SECURITY.md](SECURITY.md) before enabling it. Do not enable remote reduction for logs that must remain local.
+Evidence-Preserving Reducer may send eligible diagnostic-log content to its configured reducer model using Pi-managed authentication. Scoped Exploration may send project file content to its configured explorer model the same way, and keeps a full local transcript of every exploration. Review [SECURITY.md](SECURITY.md) before enabling either one. Do not enable them for content that must remain local.
 
 ## Documentation
 

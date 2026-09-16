@@ -19,6 +19,7 @@ import {
 	decideCompaction,
 	type CompactionDecision,
 } from "./economics.ts";
+import { collectUserDirectives } from "./directives.ts";
 import { analyzePlanTransition, formatPlanSnapshot, parsePlanSteps } from "./plan.ts";
 import {
 	appendOnlineState,
@@ -49,6 +50,9 @@ export const BOUNDARY_COMPACTION_INSTRUCTIONS =
 export const POST_COMPACTION_PLAN_REMINDER =
 	"Online context compaction finished. The parent task is still active. " +
 	"Before continuing work, call update_plan with a fresh plan for the remaining work.";
+/** Paths are cheap; the exploration needed to rediscover them is not. */
+export const CONTINUATION_FILES_MAX = 8;
+const CONTINUATION_FILE_MAX_BYTES = 200;
 
 export type OnlineContextCompactOptions = {
 	readonly cacheWriteReadRatio?: number | null;
@@ -75,6 +79,40 @@ function resolveCacheWriteReadRatio(value: number | null | undefined): number | 
 		throw new Error("Online Context Compact cacheWriteReadRatio must be finite and non-negative");
 	}
 	return value;
+}
+
+/**
+ * Most recently recorded changed files, newest first.
+ *
+ * A compaction removes the edits themselves from the window, so the model wakes
+ * up knowing that work happened but not where. Left to itself it re-derives the
+ * answer by searching, which spends a large part of what the compaction just
+ * saved. The paths are the smallest thing that turns that search back into a
+ * targeted read.
+ */
+export function recentChangedFiles(progress: readonly ProgressSummary[]): readonly string[] {
+	const files: string[] = [];
+	const seen = new Set<string>();
+	for (let index = progress.length - 1; index >= 0; index -= 1) {
+		for (const candidate of progress[index]?.filesChanged ?? []) {
+			const path = candidate.replace(/[\u0000-\u001f\u007f]/gu, " ").replace(/\s+/gu, " ").trim();
+			if (path.length === 0 || Buffer.byteLength(path, "utf8") > CONTINUATION_FILE_MAX_BYTES) continue;
+			if (seen.has(path)) continue;
+			seen.add(path);
+			files.push(path);
+			if (files.length >= CONTINUATION_FILES_MAX) return files;
+		}
+	}
+	return files;
+}
+
+export function formatPostCompactionContinuation(files: readonly string[]): string {
+	if (files.length === 0) return POST_COMPACTION_PLAN_REMINDER;
+	return [
+		POST_COMPACTION_PLAN_REMINDER,
+		`Files already changed in this session: ${files.join(", ")}. ` +
+			"Their contents are no longer in context, so re-read one before editing it again rather than searching for what changed.",
+	].join("\n");
 }
 
 function tokenEstimate(text: string): number {
@@ -493,6 +531,11 @@ export function createOnlineContextCompactExtension(options: OnlineContextCompac
 				return;
 			}
 
+			// Read before the compaction runs: session_compact clears pendingProgress,
+			// so by the time the continuation is sent these paths are gone. They are
+			// the one thing the model cannot cheaply rediscover on the other side.
+			const continuationFiles = recentChangedFiles(state.pendingProgress);
+
 			// Windowed handoff: when structured state can rebuild the handoff, hand Pi a
 			// synthetic compaction result so no summarization request is sent. An
 			// explicit reset is honored even without priced savings.
@@ -505,6 +548,7 @@ export function createOnlineContextCompactExtension(options: OnlineContextCompac
 						plan: state.plan,
 						progress: state.pendingProgress,
 						notesIndex: await noteIndex(context),
+						directives: collectUserDirectives(context.sessionManager.getBranch()),
 					}),
 				};
 			}
@@ -577,7 +621,7 @@ export function createOnlineContextCompactExtension(options: OnlineContextCompac
 						pi.sendMessage(
 							{
 								customType: "sol-pi-online-context-compact",
-								content: POST_COMPACTION_PLAN_REMINDER,
+								content: formatPostCompactionContinuation(continuationFiles),
 								display: false,
 							},
 							{ triggerTurn: true },

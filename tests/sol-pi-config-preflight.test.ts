@@ -49,6 +49,10 @@ const ALL_ENABLED = {
 	onlineContextCompact: true,
 	commandYield: true,
 	commandYieldTimeMs: 10000,
+	scopedExploration: true,
+	scopedExplorationProvider: DEFAULT_EPR_PROVIDER,
+	scopedExplorationModel: DEFAULT_EPR_MODEL,
+	scopedExplorationMaxSteps: 8,
 	cacheWriteReadRatio: 12.5,
 };
 
