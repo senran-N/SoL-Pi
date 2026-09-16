@@ -31,7 +31,13 @@ vi.mock("node:fs/promises", async (importOriginal) => {
 				}
 				race.armed = false;
 				await actual.rename(race.objectsDirectory, race.backupDirectory);
-				await actual.symlink(race.externalDirectory, race.objectsDirectory, "dir");
+				// A junction needs no privilege on Windows and lstat reports it as a
+				// symbolic link, so the race runs for real on an ordinary account.
+				await actual.symlink(
+					race.externalDirectory,
+					race.objectsDirectory,
+					process.platform === "win32" ? "junction" : "dir",
+				);
 				const handle = await actual.open(path, flags, mode);
 				if (race.restoreDirectory) {
 					await actual.rm(race.objectsDirectory);

@@ -14,7 +14,15 @@ import {
 	FULL_SENDS,
 	THRESHOLD_BYTES,
 } from "../src/sol-pi/extensions/observation-pack/index.ts";
-import { componentText, FakePi, FakeSessionManager, fakeContext, plainTheme } from "./helpers.ts";
+import {
+	componentText,
+	FakePi,
+	FakeSessionManager,
+	fakeContext,
+	fileSymlinksSupported,
+	linkDirectory,
+	plainTheme,
+} from "./helpers.ts";
 
 const roots: string[] = [];
 const SESSION_ID = "session-a";
@@ -240,7 +248,7 @@ describe("observation pack", () => {
 		expect(projected[2]).toMatch(new RegExp(`id: ${id}`, "u"));
 	});
 
-	it("fails recall closed when an object path is replaced by a symlink", async () => {
+	it("fails recall closed when the object no longer resolves to its own file", async () => {
 		const sessionDir = await sessionRoot();
 		const body = `stored\n${repeatPastThreshold("observation bytes\n")}`;
 		const message = toolResult(body);
@@ -248,10 +256,19 @@ describe("observation pack", () => {
 		const pi = observationPackPi();
 		await project(pi, message, sessionDir, 3);
 		const path = observationPath(sessionDir, id);
-		const target = join(sessionDir, "symlink-target.txt");
-		await writeFile(target, "target bytes must not be recalled");
-		await rm(path);
-		await symlink(target, path);
+		const planted = await sessionRoot();
+		const plantedBytes = "planted bytes must not be recalled";
+		await writeFile(join(planted, `${id}.txt`), plantedBytes);
+
+		// Both branches redirect the object at something the caller planted; they
+		// differ only in the link this machine is allowed to create.
+		if (fileSymlinksSupported) {
+			await rm(path);
+			await symlink(join(planted, `${id}.txt`), path);
+		} else {
+			await rm(observationObjectsDirectory(sessionDir), { recursive: true });
+			await linkDirectory(planted, observationObjectsDirectory(sessionDir));
+		}
 
 		const recall = pi.tool("obs_recall").execute(
 			"recall-1",
@@ -260,11 +277,16 @@ describe("observation pack", () => {
 			undefined,
 			fakeContext(sessionDir),
 		);
-		if (process.platform === "win32") {
-			await expect(recall).rejects.toThrow(/not a regular file/u);
-		} else {
+		if (fileSymlinksSupported) {
+			// An atomic no-follow open refuses the link itself.
 			await expect(recall).rejects.toMatchObject({ code: "ELOOP" });
+		} else {
+			// Without one, the post-open check on the directory has to catch it.
+			await expect(recall).rejects.toThrow(/not a regular directory/u);
 		}
+		// Whichever guard caught it, the planted bytes reached neither the caller
+		// nor the message explaining the refusal.
+		await expect(recall.catch((error: unknown) => String(error))).resolves.not.toContain(plantedBytes);
 	});
 
 	it("returns the exact original bytes across paged recall", async () => {
@@ -294,11 +316,11 @@ describe("observation pack", () => {
 		expect(Buffer.from(recalled, "utf8")).toEqual(Buffer.from(body, "utf8"));
 	});
 
-	it("fails storage closed when the observation directory is a symlink", async () => {
+	it("fails storage closed when the observation directory is redirected", async () => {
 		const sessionDir = await sessionRoot();
 		const targetDir = await sessionRoot();
 		await mkdir(join(sessionDir, "sol-pi", SESSION_ID, "observation-pack"), { recursive: true });
-		await symlink(targetDir, observationObjectsDirectory(sessionDir), "dir");
+		await linkDirectory(targetDir, observationObjectsDirectory(sessionDir));
 		const body = `directory guard\n${repeatPastThreshold("must not escape\n")}`;
 		const message = toolResult(body);
 		const id = observationId(message);

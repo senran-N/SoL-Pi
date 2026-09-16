@@ -5,10 +5,61 @@
 import type { AgentMessage } from "@earendil-works/pi-agent-core";
 import type { ExtensionAPI, ExtensionContext, SessionEntry, Theme, ToolDefinition } from "@earendil-works/pi-coding-agent";
 import type { Component } from "@earendil-works/pi-tui";
+import { mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { symlink } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 type Handler = (event: unknown, context: ExtensionContext) => unknown | Promise<unknown>;
+
+/**
+ * What kind of link this machine can actually create.
+ *
+ * A symbolic link on Windows needs SeCreateSymbolicLinkPrivilege, which an
+ * ordinary account does not have unless Developer Mode is on. A directory
+ * junction needs no privilege and Node reports it as a symbolic link, so the
+ * guards that reject a redirected directory can be exercised for real on such a
+ * machine rather than skipped - which matters most here, because Windows is
+ * exactly where SoL-Pi has no atomic no-follow open to fall back on.
+ */
+function probeLink(make: (probeDirectory: string) => void): boolean {
+	let probe: string | undefined;
+	try {
+		probe = mkdtempSync(join(tmpdir(), "sol-pi-link-probe-"));
+		make(probe);
+		return true;
+	} catch {
+		return false;
+	} finally {
+		if (probe) rmSync(probe, { recursive: true, force: true });
+	}
+}
+
+/** A link that replaces one file, which only a real symlink can do. */
+export const fileSymlinksSupported: boolean = probeLink((probe) => {
+	const target = join(probe, "target.txt");
+	writeFileSync(target, "probe");
+	symlinkSync(target, join(probe, "link.txt"), "file");
+});
+
+/** The link type that redirects a directory here, or undefined if neither works. */
+export const directoryLinkType: "dir" | "junction" | undefined = probeLink((probe) =>
+	symlinkSync(probe, join(probe, "self-link"), "dir"),
+)
+	? "dir"
+	: probeLink((probe) => symlinkSync(probe, join(probe, "self-link"), "junction"))
+		? "junction"
+		: undefined;
+
+/**
+ * Redirect a directory the way this machine allows. Both kinds are reparse
+ * points that `lstat` reports as symbolic links, so the guard under test sees
+ * the same thing either way.
+ */
+export async function linkDirectory(target: string, linkPath: string): Promise<void> {
+	if (!directoryLinkType) throw new Error("this machine cannot redirect a directory");
+	await symlink(target, linkPath, directoryLinkType);
+}
 
 export const plainTheme = {
 	fg: (_color: string, text: string) => text,
