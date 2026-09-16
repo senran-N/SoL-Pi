@@ -27,6 +27,8 @@ ObservationPack changes only the messages projected through the public `context`
 
 A failed tool result participates on the same terms as a successful one. The window fills fastest exactly when something is broken, so a large failing test run or stack trace is packed rather than replayed; the projected result keeps its error flag, the placeholder states the call failed, and the diagnostic text stays recallable byte for byte through `obs_recall`. Mixed-content results and reducer receipts are still passed through untouched.
 
+Object access uses `O_NOFOLLOW` when the platform exposes it. Every opened object is also checked against its pathname identity before any bytes are read or written, and its storage directories are revalidated after the open. This preserves symlink rejection on platforms such as Windows where Node does not expose an atomic no-follow flag.
+
 ## Scoped Exploration
 
 Scoped Exploration registers one tool and no event handlers, so it changes nothing about how Pi assembles context. Its nested call resolves the configured explorer provider/model through Pi's model registry on the same path Evidence-Preserving Reducer uses, including the fallback for a build whose registry exposes no `complete()` method. Its filesystem access is its own: three read-only primitives bounded to the project root, never Pi's tools, so an exploration cannot write, run a command, or reach outside the checkout regardless of the surrounding approval mode.

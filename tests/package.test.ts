@@ -11,13 +11,28 @@ interface PackReport {
 	files: Array<{ path: string }>;
 }
 
+const PACK_ARGUMENTS = ["pack", "--dry-run", "--json"];
+
+/**
+ * Node refuses to spawn a `.cmd` file without a shell, so the Windows npm
+ * shim has to go through one. The whole command is passed as a single string
+ * rather than as arguments, which keeps the shell from re-splitting them and
+ * avoids the deprecated args-with-shell form. Every part of it is a literal.
+ */
 function packedFiles(): string[] {
-	const result = spawnSync("npm", ["pack", "--dry-run", "--json"], {
-		cwd: process.cwd(),
-		encoding: "utf8",
-		timeout: 25_000,
-	});
-	if (result.status !== 0) throw new Error(result.stderr || result.stdout);
+	const windows = process.platform === "win32";
+	const result = windows
+		? spawnSync(["npm", ...PACK_ARGUMENTS].join(" "), {
+				cwd: process.cwd(),
+				encoding: "utf8",
+				timeout: 25_000,
+				shell: true,
+			})
+		: spawnSync("npm", PACK_ARGUMENTS, { cwd: process.cwd(), encoding: "utf8", timeout: 25_000 });
+	// A spawn that never ran reports no status and no output; without this the
+	// failure surfaces as an error with an empty message.
+	if (result.error) throw result.error;
+	if (result.status !== 0) throw new Error(result.stderr || result.stdout || `npm pack exited with ${result.status}`);
 	const report = JSON.parse(result.stdout) as PackReport[];
 	return report[0]?.files.map((file) => file.path) ?? [];
 }
