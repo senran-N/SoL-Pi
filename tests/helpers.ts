@@ -111,6 +111,8 @@ export class FakeSessionManager {
 export class FakePi {
 	readonly handlers = new Map<string, Handler[]>();
 	readonly registeredTools: ToolDefinition[] = [];
+	/** Shell tool Pi would have active; Command Yield replaces whichever one this names. */
+	activeTools: string[] = ["bash"];
 	readonly sentMessages: Array<{
 		message: { customType: string; content: string; display: boolean; details?: unknown };
 		options: { triggerTurn?: boolean; deliverAs?: "steer" | "followUp" | "nextTurn" } | undefined;
@@ -129,6 +131,10 @@ export class FakePi {
 
 	registerTool(tool: ToolDefinition): void {
 		this.registeredTools.push(tool);
+	}
+
+	getActiveTools(): string[] {
+		return this.activeTools;
 	}
 
 	appendEntry(customType: string, data?: unknown): void {

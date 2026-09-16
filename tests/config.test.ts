@@ -113,6 +113,26 @@ describe("SoL-Pi config", () => {
 		}
 	});
 
+	it("loads an explicit command yield deadline", () => {
+		const { agentDir, cwd } = fixture();
+		const path = join(agentDir, "sol-pi.json");
+		writeFileSync(path, JSON.stringify({ version: 1, commandYield: true, commandYieldTimeMs: 30_000 }));
+		expect(loadSolPiConfig(cwd, agentDir, true)).toEqual({
+			...DEFAULT_CONFIG,
+			commandYield: true,
+			commandYieldTimeMs: 30_000,
+		});
+	});
+
+	it.each([null, "10000", 10.5, 999, 300_001])("rejects an invalid command yield deadline: %j", (commandYieldTimeMs) => {
+		const { agentDir, cwd } = fixture();
+		const path = join(agentDir, "sol-pi.json");
+		writeFileSync(path, JSON.stringify({ version: 1, commandYieldTimeMs }));
+		expect(() => loadSolPiConfig(cwd, agentDir, true)).toThrow(
+			"SoL-Pi config commandYieldTimeMs must be an integer between 1000 and 300000",
+		);
+	});
+
 	it("loads an explicit Evidence-Preserving Reducer provider/model route", () => {
 		const { agentDir, cwd } = fixture();
 		const path = join(agentDir, "sol-pi.json");

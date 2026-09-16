@@ -13,6 +13,8 @@ import {
 	createActionFusionExtension,
 } from "../src/sol-pi/extensions/action-fusion/index.ts";
 import { withFusedFileQueue } from "../src/sol-pi/extensions/action-fusion/file-queue.ts";
+import { createYieldingOperations } from "../src/sol-pi/extensions/command-yield/operations.ts";
+import { createRegistry } from "../src/sol-pi/extensions/command-yield/registry.ts";
 import { componentText, plainTheme } from "./helpers.ts";
 
 function delay(ms: number): Promise<void> {
@@ -172,6 +174,37 @@ describe("action fusion then_run", () => {
 		expect(commands).toEqual(["check write"]);
 		expect(text(result)).toContain("[then_run:succeeded]");
 		expect(text(result)).toContain("write check passed");
+	});
+
+	it("reports a fused command that yielded as running, not succeeded", async () => {
+		const dir = await createTempDir();
+		const filePath = join(dir, "server.ts");
+		// A fused `npm run dev` must not hold the turn open forever either.
+		const registry = createRegistry();
+		const operations = createYieldingOperations({
+			registry,
+			yieldTimeMs: 20,
+			inner: {
+				exec: (_command, _cwd, { onData }) => {
+					onData(Buffer.from("listening on 3000\n"));
+					return new Promise(() => {});
+				},
+			},
+		});
+		const { write } = loadFusedTools({ bashOptions: { operations } });
+
+		const result = await write.execute(
+			"write-yield",
+			{ path: filePath, content: "export {};\n", then_run: { command: "npm run dev" } },
+			undefined,
+			undefined,
+			createContext(dir),
+		);
+
+		expect(text(result)).toContain("[then_run:running]");
+		expect(text(result)).not.toContain("[then_run:succeeded]");
+		expect(text(result)).toContain("listening on 3000");
+		expect(text(result)).toContain(`handle=${registry.list()[0]?.id}`);
 	});
 
 	it("announces savings only after a fused command succeeds in TUI mode", async () => {

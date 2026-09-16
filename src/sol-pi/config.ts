@@ -7,6 +7,11 @@ import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { CONFIG_DIR_NAME, getAgentDir } from "@earendil-works/pi-coding-agent";
 import {
+	DEFAULT_COMMAND_YIELD_TIME_MS,
+	MAX_YIELD_TIME_MS,
+	MIN_YIELD_TIME_MS,
+} from "./extensions/command-yield/config.ts";
+import {
 	DEFAULT_REDUCER_MODEL,
 	DEFAULT_REDUCER_PROVIDER,
 } from "./extensions/evidence-preserving-reducer/config.ts";
@@ -21,6 +26,8 @@ export interface SolPiConfig {
 	readonly evidencePreservingReducerModel: string;
 	readonly evidencePreservingReducerProvider: string;
 	readonly onlineContextCompact: boolean;
+	readonly commandYield: boolean;
+	readonly commandYieldTimeMs: number;
 	readonly cacheWriteReadRatio: number;
 }
 
@@ -32,6 +39,8 @@ export const DEFAULT_CONFIG: SolPiConfig = Object.freeze({
 	evidencePreservingReducerModel: DEFAULT_REDUCER_MODEL,
 	evidencePreservingReducerProvider: DEFAULT_REDUCER_PROVIDER,
 	onlineContextCompact: false,
+	commandYield: false,
+	commandYieldTimeMs: DEFAULT_COMMAND_YIELD_TIME_MS,
 	cacheWriteReadRatio: DEFAULT_CACHE_WRITE_READ_RATIO,
 });
 
@@ -40,9 +49,16 @@ const FEATURE_KEYS = [
 	"observationPack",
 	"evidencePreservingReducer",
 	"onlineContextCompact",
+	"commandYield",
 ] as const;
 const STRING_KEYS = ["evidencePreservingReducerModel", "evidencePreservingReducerProvider"] as const;
-const CONFIG_KEYS = new Set<string>(["version", ...FEATURE_KEYS, ...STRING_KEYS, "cacheWriteReadRatio"]);
+const CONFIG_KEYS = new Set<string>([
+	"version",
+	...FEATURE_KEYS,
+	...STRING_KEYS,
+	"cacheWriteReadRatio",
+	"commandYieldTimeMs",
+]);
 
 export function findConfigPath(
 	cwd = process.cwd(),
@@ -99,6 +115,19 @@ export function loadSolPiConfig(
 	) {
 		throw new Error(`SoL-Pi config cacheWriteReadRatio must be a finite non-negative number: ${path}`);
 	}
+	const commandYieldTimeMs = Object.hasOwn(record, "commandYieldTimeMs")
+		? record.commandYieldTimeMs
+		: DEFAULT_COMMAND_YIELD_TIME_MS;
+	if (
+		typeof commandYieldTimeMs !== "number" ||
+		!Number.isInteger(commandYieldTimeMs) ||
+		commandYieldTimeMs < MIN_YIELD_TIME_MS ||
+		commandYieldTimeMs > MAX_YIELD_TIME_MS
+	) {
+		throw new Error(
+			`SoL-Pi config commandYieldTimeMs must be an integer between ${MIN_YIELD_TIME_MS} and ${MAX_YIELD_TIME_MS}: ${path}`,
+		);
+	}
 	const evidencePreservingReducerModel = stringConfigValue(
 		record,
 		"evidencePreservingReducerModel",
@@ -116,6 +145,7 @@ export function loadSolPiConfig(
 		...DEFAULT_CONFIG,
 		...record,
 		cacheWriteReadRatio,
+		commandYieldTimeMs,
 		evidencePreservingReducerModel,
 		evidencePreservingReducerProvider,
 	}) as SolPiConfig;

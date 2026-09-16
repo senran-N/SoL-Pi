@@ -60,7 +60,7 @@ describe("SoL-Pi entrypoint", () => {
 		expect(pi.handlers.size).toBe(0);
 	});
 
-	it("registers all four standalone mechanisms from one config", () => {
+	it("registers all five standalone mechanisms from one config", () => {
 		const pi = new FakePi();
 		registerConfiguredFeatures(pi.asExtensionApi(), {
 			...DEFAULT_CONFIG,
@@ -68,9 +68,14 @@ describe("SoL-Pi entrypoint", () => {
 			observationPack: true,
 			evidencePreservingReducer: true,
 			onlineContextCompact: true,
+			commandYield: true,
 		});
 
 		expect(pi.registeredTools.map((tool) => tool.name)).toEqual([
+			"bash",
+			"exec_wait",
+			"exec_list",
+			"exec_kill",
 			"edit",
 			"write",
 			"obs_recall",

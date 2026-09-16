@@ -11,12 +11,22 @@ const FEATURE_KEYS = [
 	"observationPack",
 	"evidencePreservingReducer",
 	"onlineContextCompact",
+	"commandYield",
 ];
 const DEFAULT_CACHE_WRITE_READ_RATIO = 12.5;
+const DEFAULT_COMMAND_YIELD_TIME_MS = 10_000;
+const MIN_YIELD_TIME_MS = 1_000;
+const MAX_YIELD_TIME_MS = 300_000;
 const DEFAULT_EPR_REDUCER_PROVIDER = ["openai", "codex"].join("-");
 const DEFAULT_EPR_REDUCER_MODEL = ["gpt-5.6", "luna"].join("-");
 const STRING_KEYS = ["evidencePreservingReducerModel", "evidencePreservingReducerProvider"];
-const CONFIG_KEYS = new Set(["version", ...FEATURE_KEYS, ...STRING_KEYS, "cacheWriteReadRatio"]);
+const CONFIG_KEYS = new Set([
+	"version",
+	...FEATURE_KEYS,
+	...STRING_KEYS,
+	"cacheWriteReadRatio",
+	"commandYieldTimeMs",
+]);
 
 function fail(message) {
 	throw new Error(message);
@@ -85,6 +95,18 @@ function validateConfig(value, requireAllEnabled) {
 		fail("cacheWriteReadRatio must be a finite non-negative number");
 	}
 	effective.cacheWriteReadRatio = cacheWriteReadRatio;
+	const commandYieldTimeMs = Object.hasOwn(value, "commandYieldTimeMs")
+		? value.commandYieldTimeMs
+		: DEFAULT_COMMAND_YIELD_TIME_MS;
+	if (
+		typeof commandYieldTimeMs !== "number" ||
+		!Number.isInteger(commandYieldTimeMs) ||
+		commandYieldTimeMs < MIN_YIELD_TIME_MS ||
+		commandYieldTimeMs > MAX_YIELD_TIME_MS
+	) {
+		fail(`commandYieldTimeMs must be an integer between ${MIN_YIELD_TIME_MS} and ${MAX_YIELD_TIME_MS}`);
+	}
+	effective.commandYieldTimeMs = commandYieldTimeMs;
 	effective.evidencePreservingReducerModel = stringConfigValue(
 		value,
 		"evidencePreservingReducerModel",

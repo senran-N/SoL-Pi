@@ -47,6 +47,8 @@ const ALL_ENABLED = {
 	evidencePreservingReducerProvider: DEFAULT_EPR_PROVIDER,
 	evidencePreservingReducerModel: DEFAULT_EPR_MODEL,
 	onlineContextCompact: true,
+	commandYield: true,
+	commandYieldTimeMs: 10000,
 	cacheWriteReadRatio: 12.5,
 };
 
@@ -70,6 +72,25 @@ describe("SoL-Pi configuration preflight", () => {
 		const result = run(writeConfig(withoutRatio));
 		expect(result.status).toBe(0);
 		expect(JSON.parse(result.stdout).effective_config.cacheWriteReadRatio).toBe(12.5);
+	});
+
+	it("applies the default yield deadline when the field is omitted", () => {
+		const { commandYieldTimeMs: _yield, ...withoutYield } = ALL_ENABLED;
+		const result = run(writeConfig(withoutYield));
+		expect(result.status).toBe(0);
+		expect(JSON.parse(result.stdout).effective_config.commandYieldTimeMs).toBe(10000);
+	});
+
+	it.each([null, "10000", 10.5, 999, 300_001])("rejects an invalid yield deadline: %j", (commandYieldTimeMs) => {
+		const result = run(writeConfig({ ...ALL_ENABLED, commandYieldTimeMs }));
+		expect(result.status).toBe(1);
+		expect(result.stderr).toContain("commandYieldTimeMs must be an integer between 1000 and 300000");
+	});
+
+	it("rejects a managed profile that leaves command yield off", () => {
+		const result = run(writeConfig({ ...ALL_ENABLED, commandYield: false }));
+		expect(result.status).toBe(1);
+		expect(result.stderr).toContain("commandYield must be true");
 	});
 
 	it("applies default EPR reducer provider/model when those fields are omitted", () => {

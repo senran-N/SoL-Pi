@@ -7,9 +7,11 @@ import { readFile } from "node:fs/promises";
 import type { AgentToolResult } from "@earendil-works/pi-agent-core";
 import { type BashToolOptions, createBashToolDefinition, type ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
+import { YIELD_MARKER } from "../command-yield/config.ts";
 import { withFusedFileQueue } from "./file-queue.ts";
 
 export const THEN_RUN_SUCCEEDED = "[then_run:succeeded]";
+export const THEN_RUN_RUNNING = "[then_run:running]";
 export const THEN_RUN_FAILED = "[then_run:failed]";
 export const THEN_RUN_SKIPPED = "[then_run:skipped]";
 
@@ -112,11 +114,13 @@ export async function executeMutationThenRun<TDetails>({
 		try {
 			const bashResult = await bash.execute(`${toolCallId}:then_run`, thenRun, signal, undefined, ctx);
 			const output = resultText(bashResult);
+			// A command that yielded a handle has not succeeded; it is still running.
+			const status = output.includes(YIELD_MARKER) ? THEN_RUN_RUNNING : THEN_RUN_SUCCEEDED;
 			return {
 				...mutationResult,
 				content: [
 					...mutationResult.content,
-					{ type: "text", text: output ? `${THEN_RUN_SUCCEEDED}\n${output}` : THEN_RUN_SUCCEEDED },
+					{ type: "text", text: output ? `${status}\n${output}` : status },
 				],
 			};
 		} catch (error) {

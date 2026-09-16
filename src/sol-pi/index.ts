@@ -6,12 +6,23 @@
 import { getAgentDir, type ExtensionAPI, type ExtensionContext, type ExtensionFactory } from "@earendil-works/pi-coding-agent";
 import { loadSolPiConfig, type SolPiConfig } from "./config.ts";
 import { registerActionFusion } from "./extensions/action-fusion/index.ts";
+import { registerCommandYield } from "./extensions/command-yield/index.ts";
 import { registerEvidencePreservingReducer } from "./extensions/evidence-preserving-reducer/index.ts";
 import { registerObservationPack } from "./extensions/observation-pack/index.ts";
 import { registerOnlineContextCompact } from "./extensions/online-context-compact/index.ts";
 
 export function registerConfiguredFeatures(pi: ExtensionAPI, config: SolPiConfig): void {
-	if (config.actionFusion) registerActionFusion(pi);
+	/*
+	 * Command Yield first: it owns the shell execution backend, and Action
+	 * Fusion has to run a fused `then_run` through the same one or a fused
+	 * long command would still block the turn.
+	 */
+	const commandYield = config.commandYield
+		? registerCommandYield(pi, { yieldTimeMs: config.commandYieldTimeMs })
+		: undefined;
+	if (config.actionFusion) {
+		registerActionFusion(pi, commandYield ? { bashOptions: { operations: commandYield.bashOperations } } : {});
+	}
 	if (config.observationPack) registerObservationPack(pi);
 	if (config.evidencePreservingReducer) {
 		registerEvidencePreservingReducer(pi, {

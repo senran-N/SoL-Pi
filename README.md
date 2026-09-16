@@ -31,6 +31,8 @@ SoL-Pi grew out of a broader question from our auto-research work: before scalin
 
 The standalone release contains four mechanisms that survived that process. They operate at different parts of the harness and compose through Pi's public extension APIs.
 
+A fifth mechanism, Command Yield, addresses a different failure. Pi's shell tool has no default timeout, so a command that crashed without exiting, deadlocked, or blocked on stdin holds the turn open until someone interrupts it. Command Yield gives the foreground a deadline without giving the command a kill.
+
 ## What SoL-Pi Adds
 
 | Area | Mechanism | What changes |
@@ -39,6 +41,7 @@ The standalone release contains four mechanisms that survived that process. They
 | Observations | **ObservationPack** | Repeated large text results become stable handles with exact paged recall. |
 | Delegation | **Evidence-Preserving Reducer** | Long diagnostic logs become compact receipts only when every retained quotation matches the archived source. |
 | Context | **Online Context Compact** | Completed plan steps become candidate points for Pi's native compaction, subject to economic and window-pressure checks; after a successful compaction, Pi continues the task in a new turn. |
+| Commands | **Command Yield** | A command that outlives its foreground deadline returns what it printed plus a live handle, and keeps running; `exec_wait` collects only what it prints next. |
 
 The mechanisms share four rules:
 
@@ -92,7 +95,7 @@ SoL-Pi uses a single effective configuration. With the official Pi distribution,
 
 If neither file exists, SoL-Pi uses its built-in defaults. The project-level configuration takes precedence over the user-level configuration; the two files are not merged.
 
-The following conservative configuration enables only the two local mechanisms that make no additional model calls and do not stop an active run:
+The following conservative configuration enables only the three local mechanisms that make no additional model calls and do not stop an active run:
 
 ```json
 {
@@ -101,6 +104,7 @@ The following conservative configuration enables only the two local mechanisms t
   "observationPack": true,
   "evidencePreservingReducer": false,
   "onlineContextCompact": false,
+  "commandYield": true,
   "cacheWriteReadRatio": 12.5
 }
 ```
@@ -120,6 +124,8 @@ ObservationPack and Evidence-Preserving Reducer store session-specific archives 
 ```
 
 They archive eligible source material in this directory. The archived copies remain local and are not automatically deleted when the Pi session ends.
+
+Command Yield writes nothing to disk. A yielded command's output is held in memory, capped per handle, and discarded with the session; command lines are never written to a log, because they can carry credentials. A command that yielded a handle is killed when the Pi session shuts down, so it does not outlive the session.
 
 Online Context Compact stores its state in Pi's session log. After a successful compaction, it starts a new turn and automatically continues the active task. Cancelling the run or exiting Pi does not trigger automatic continuation.
 

@@ -45,6 +45,8 @@ describe("agent installation instructions", () => {
 			'"evidencePreservingReducerProvider": "provider-id"',
 			'"evidencePreservingReducerModel": "model-id"',
 			'"onlineContextCompact": true',
+			'"commandYield": true',
+			'"commandYieldTimeMs": 10000',
 			'"cacheWriteReadRatio": 12.5',
 			"scripts/check-sol-pi-config.mjs",
 			"pi list",

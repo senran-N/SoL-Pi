@@ -30,6 +30,7 @@ it("loads the package entrypoint and executes fused tools in an all-enabled Pi s
 			observationPack: true,
 			evidencePreservingReducer: true,
 			onlineContextCompact: true,
+			commandYield: true,
 		}));
 		const faux = fauxProvider({ provider: "sol-pi-package-test", api: "sol-pi-package-test-api" });
 		faux.setResponses([
@@ -74,11 +75,18 @@ it("loads the package entrypoint and executes fused tools in an all-enabled Pi s
 		}));
 		const errors: unknown[] = [];
 		await session.bindExtensions({ onError: (error) => errors.push(error) });
-		expect(session.getActiveToolNames()).toEqual(expect.arrayContaining(["edit", "write", "obs_recall", "update_plan"]));
-		const solPi = resourceLoader.getExtensions().extensions.find((extension) => extension.path.endsWith("src/sol-pi/index.ts"));
+		expect(session.getActiveToolNames()).toEqual(
+			expect.arrayContaining(["edit", "write", "obs_recall", "update_plan", "exec_wait", "exec_list", "exec_kill"]),
+		);
+		const solPi = resourceLoader
+			.getExtensions()
+			.extensions.find((extension) => extension.path.replaceAll("\\", "/").endsWith("src/sol-pi/index.ts"));
 		expect(solPi?.handlers.has("tool_result")).toBe(true);
 		expect(solPi?.handlers.has("context")).toBe(true);
 		expect(solPi?.handlers.has("agent_settled")).toBe(true);
+		expect(solPi?.handlers.has("session_shutdown")).toBe(true);
+		// Command Yield must have replaced the live shell tool, not added a second one.
+		expect(solPi?.tools.has("bash") || solPi?.tools.has("powershell")).toBe(true);
 
 		await session.prompt("run the package smoke test", { expandPromptTemplates: false });
 		const toolResults = sessionManager.getBranch().flatMap((entry) =>

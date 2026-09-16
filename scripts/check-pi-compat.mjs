@@ -9,6 +9,9 @@ import {
 	SessionManager,
 	createBashToolDefinition,
 	createEditToolDefinition,
+	createLocalBashOperations,
+	createLocalPowerShellOperations,
+	createPowerShellToolDefinition,
 	createWriteToolDefinition,
 	getAgentDir,
 } from "@earendil-works/pi-coding-agent";
@@ -17,6 +20,9 @@ import { complete as completeCompat } from "@earendil-works/pi-ai/compat";
 for (const [name, value] of Object.entries({
 	createBashToolDefinition,
 	createEditToolDefinition,
+	createLocalBashOperations,
+	createLocalPowerShellOperations,
+	createPowerShellToolDefinition,
 	createWriteToolDefinition,
 	getApiKeyAndHeaders: ModelRegistry.prototype.getApiKeyAndHeaders,
 	getAgentDir,

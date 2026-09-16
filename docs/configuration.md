@@ -23,11 +23,13 @@ The project file replaces the global file. SoL-Pi does not merge them.
   "evidencePreservingReducerProvider": "provider-id",
   "evidencePreservingReducerModel": "model-id",
   "onlineContextCompact": false,
+  "commandYield": false,
+  "commandYieldTimeMs": 10000,
   "cacheWriteReadRatio": 12.5
 }
 ```
 
-Feature keys may be omitted and then default to `false`. `cacheWriteReadRatio` may be omitted and then defaults to `12.5`; when present it must be a finite non-negative number, and `0` explicitly means that a cache write adds no cost relative to a cache read. `evidencePreservingReducerProvider` and `evidencePreservingReducerModel` may be omitted and then use the built-in reducer route; when present each must be a non-empty string. Unknown keys, unsupported versions, malformed JSON, non-boolean feature values, invalid ratios, and invalid reducer model fields stop extension loading with a direct error.
+Feature keys may be omitted and then default to `false`. `cacheWriteReadRatio` may be omitted and then defaults to `12.5`; when present it must be a finite non-negative number, and `0` explicitly means that a cache write adds no cost relative to a cache read. `commandYieldTimeMs` may be omitted and then defaults to `10000`; when present it must be an integer between `1000` and `300000`. `evidencePreservingReducerProvider` and `evidencePreservingReducerModel` may be omitted and then use the built-in reducer route; when present each must be a non-empty string. Unknown keys, unsupported versions, malformed JSON, non-boolean feature values, invalid ratios, invalid yield deadlines, and invalid reducer model fields stop extension loading with a direct error.
 
 For the managed all-enabled installation described in the [agent installation and configuration protocol](../agents-install.md), validate the effective file before starting Pi:
 
@@ -37,7 +39,7 @@ node scripts/check-sol-pi-config.mjs \
   --require-all-enabled
 ```
 
-This preflight does not make every valid SoL-Pi configuration all-enabled. Without `--require-all-enabled`, omitted feature keys retain their normal `false` defaults. The managed workflow uses the flag because its acceptance criterion is that all four mechanisms are active.
+This preflight does not make every valid SoL-Pi configuration all-enabled. Without `--require-all-enabled`, omitted feature keys retain their normal `false` defaults. The managed workflow uses the flag because its acceptance criterion is that all five mechanisms are active.
 
 ## Feature behavior
 
@@ -47,6 +49,8 @@ This preflight does not make every valid SoL-Pi configuration all-enabled. Witho
 - `evidencePreservingReducerProvider`: provider namespace used to resolve the reducer model through Pi's model registry.
 - `evidencePreservingReducerModel`: model id used for Evidence-Preserving Reducer.
 - `onlineContextCompact`: registers `update_plan`, the durable-note tools `note_write`/`note_append`/`note_read`, the window tools `get_context_remaining`/`new_context`, the recall tools `history_search`/`history_read`, and boundary-driven compaction after the other SoL-Pi context transformers.
+- `commandYield`: replaces the execution backend of the active shell tool (`bash` or `powershell`, whichever Pi has live) and registers `exec_wait`, `exec_list`, and `exec_kill`. A command that outlives its deadline returns its output so far plus a handle; the command keeps running and is not killed. When Action Fusion is also enabled, a fused `then_run` uses the same backend and reports `[then_run:running]` instead of `[then_run:succeeded]` when it yields.
+- `commandYieldTimeMs`: how long a command may hold the foreground before it yields a handle. A yield is not destructive, so this is short by default; `exec_wait` accepts a larger per-call budget.
 - `cacheWriteReadRatio`: supplies the single economic decision ratio used by Online Context Compact.
 
 ## Evidence-Preserving Reducer runtime inputs
@@ -68,11 +72,19 @@ When the plan and at least one progress summary are both recorded, the extension
 
 The assistant can also ask for a window directly with `new_context` and check the budget with `get_context_remaining`; a requested reset is honored even when the economic gate would decline, but it is applied at the next idle settlement so the tool call never aborts the turn that made it, and it is declined outright when the session has nothing Pi could archive. Each compaction appends one audit line to `<runtimeRoot>/online-context-compact/windows.jsonl`. Windows are numbered by recorded compaction, not by context reset, so a correction that rebuilds the plan without producing a checkpoint never leaves a gap in the ids or makes a fragment point at a predecessor that does not exist. The fragment carries only a bounded index of durable notes; the note bodies live in `<runtimeRoot>/online-context-compact/notes/<slug>.md` and are read back on demand with `note_read`. `history_search`/`history_read` make the same guarantee for the session log itself: they read only the entries Pi already recorded on the current branch, including work a compaction removed from the window but never a branch that was forked or rewound away from, and they bound both a search answer (4 KB) and a single read (24 KB) so recalling the past cannot refill the window.
 
+## Command Yield runtime inputs
+
+The release entry uses one runtime input, `commandYieldTimeMs`, and takes everything else from Pi.
+
+A command that finishes inside its deadline is untouched: the same output, the same exit code, the same errors. A command that does not finish has its output so far returned with a trailer that names a handle, and it keeps running. `exec_wait` returns only the bytes produced since the last read, so polling a long command does not re-send its whole log; each increment is capped at 16 KB and 400 lines, and the rest stays pending. Retained output is capped per handle, and anything dropped to stay inside that cap is counted in the next increment rather than silently skipped.
+
+An explicit `timeout` in the shell tool call keeps Pi's destructive meaning and reaches Pi's backend unchanged; the yield deadline is separate and never terminates anything. Before a yield, interrupting the turn kills the process tree through Pi's own teardown. After a yield the command belongs to its handle, so a later turn's interrupt does not reach it; `exec_kill` and session shutdown do. Nothing is written to disk, and command lines are never logged, because a command line can carry a credential.
+
 ## Pi integration
 
 SoL-Pi reads no dedicated environment variables. Evidence-Preserving Reducer resolves its configured reducer provider/model through `ExtensionContext.modelRegistry` and uses Pi-managed authentication. If the configured reducer model is unavailable or the nested model call fails, the original tool result continues unchanged.
 
-SoL-Pi does not configure shell paths, command prefixes, storage paths, run IDs, provider URLs, reasoning levels, timeouts, or per-mechanism enable flags through environment variables. Apart from the EPR reducer provider/model route in `sol-pi.json`, model selection remains with Pi. Action Fusion uses Pi's default shell behavior. Persistent artifacts are derived from Pi's session directory and session ID.
+SoL-Pi does not configure shell paths, command prefixes, storage paths, run IDs, provider URLs, reasoning levels, timeouts, or per-mechanism enable flags through environment variables. Apart from the EPR reducer provider/model route in `sol-pi.json`, model selection remains with Pi. Action Fusion uses Pi's default shell behavior, and Command Yield composes Pi's own execution backend through the public `BashToolOptions.operations` seam rather than spawning processes itself, so shell resolution, environment handling, and process-tree teardown stay Pi's. Persistent artifacts are derived from Pi's session directory and session ID.
 
 ## Trust
 
