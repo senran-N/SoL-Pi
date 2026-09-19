@@ -39,8 +39,6 @@ type HistoryRecord = {
 	readonly text: string;
 };
 
-const MAX_TOOL_ARGUMENT_CHARS = 200;
-
 function byteLength(text: string): number {
 	return Buffer.byteLength(text, "utf8");
 }
@@ -68,7 +66,7 @@ function textFromContent(content: unknown): string {
 		}
 		if (record.type === "toolCall" && typeof record.name === "string") {
 			const args = record.arguments === undefined ? "" : JSON.stringify(record.arguments);
-			parts.push(`[tool ${record.name}] ${args.slice(0, MAX_TOOL_ARGUMENT_CHARS)}`);
+			parts.push(`[tool ${record.name}] ${args}`);
 		}
 	}
 	return parts.join("\n");
@@ -149,14 +147,41 @@ export function searchHistory(
 	return { total, hits, truncated: truncated || total > hits.length };
 }
 
-/** Full text of one recorded entry, bounded so a read cannot refill the window. */
+/** Full checkpoint lives on the compaction entry, not in a truncated preview. */
+function checkpointRecord(entries: readonly SessionEntry[], id: string): HistoryRecord | undefined {
+	if (!/^checkpoint-w\d+$/u.test(id)) return undefined;
+	for (let index = entries.length - 1; index >= 0; index--) {
+		const entry = entries[index];
+		if (entry?.type !== "compaction") continue;
+		const details = entry.details as { solPiWindow?: { windowId?: string; checkpoint?: unknown } } | undefined;
+		if (`checkpoint-${details?.solPiWindow?.windowId}` !== id || !details?.solPiWindow?.checkpoint) continue;
+		return { id, index: index + 1, kind: "checkpoint", text: JSON.stringify(details.solPiWindow.checkpoint, null, 2) };
+	}
+	return undefined;
+}
+
+/** Byte offsets address the original UTF-8 text, never the display marker. */
 export function readHistoryEntry(
 	entries: readonly SessionEntry[],
 	id: string,
-): { readonly kind: string; readonly index: number; readonly text: string } | undefined {
-	const record = recordsOf(entries).find((candidate) => candidate.id === id);
+	offset = 0,
+	limit = HISTORY_READ_MAX_BYTES,
+): { readonly kind: string; readonly index: number; readonly text: string;
+	readonly offset: number; readonly endOffset: number; readonly totalBytes: number; readonly nextOffset: number | null } | undefined {
+	if (!Number.isSafeInteger(offset) || offset < 0) throw new Error("history offset must be a non-negative safe integer");
+	if (!Number.isSafeInteger(limit) || limit < 128 || limit > HISTORY_READ_MAX_BYTES) {
+		throw new Error(`history limit must be between 128 and ${HISTORY_READ_MAX_BYTES} bytes`);
+	}
+	const record = checkpointRecord(entries, id) ?? recordsOf(entries).find((candidate) => candidate.id === id);
 	if (!record) return undefined;
-	const budget = HISTORY_READ_MAX_BYTES - byteLength(HISTORY_TRUNCATION_MARKER) - 1;
-	const text = byteLength(record.text) > budget ? `${sliceBytes(record.text, budget)}\n${HISTORY_TRUNCATION_MARKER}` : record.text;
-	return { kind: record.kind, index: record.index, text };
+	const buffer = Buffer.from(record.text, "utf8");
+	if (offset > buffer.length || (offset < buffer.length && ((buffer[offset] ?? 0) & 0xc0) === 0x80)) {
+		throw new Error("history offset must be within the entry at a UTF-8 character boundary; use next_offset");
+	}
+	const budget = limit - byteLength(HISTORY_TRUNCATION_MARKER) - 1;
+	const body = sliceBytes(buffer.subarray(offset).toString("utf8"), budget);
+	const endOffset = offset + byteLength(body);
+	const nextOffset = endOffset < buffer.length ? endOffset : null;
+	return { kind: record.kind, index: record.index, offset, endOffset, totalBytes: buffer.length, nextOffset,
+		text: nextOffset === null ? body : `${body}\n${HISTORY_TRUNCATION_MARKER}` };
 }

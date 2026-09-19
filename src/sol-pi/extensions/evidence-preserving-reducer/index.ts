@@ -26,6 +26,7 @@ import type {
 	ToolResultEvent,
 } from "@earendil-works/pi-coding-agent";
 import { runtimeRoot } from "../../runtime-paths.ts";
+import { UsageLedgerError } from "../../usage/ledger.ts";
 import { formatSavingsBytes, showSolPiSavings } from "../../tui.ts";
 import { archiveBody, archiveRoot } from "./archive.ts";
 import { reducibleToolResult } from "./candidate.ts";
@@ -89,6 +90,8 @@ export async function reduceToolResult(
 	try {
 		provider = await callReducer(config, command, event.isError, archive, body, context);
 	} catch (error) {
+		// Falling back must not hide an accounting write failure after a paid call.
+		if (error instanceof UsageLedgerError) throw error;
 		const name = errorName(error);
 		journal("fallback", {
 			toolCallId: event.toolCallId,

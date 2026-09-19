@@ -45,6 +45,7 @@ A sixth mechanism, Scoped Exploration, addresses what the others cannot reach. F
 | Context | **Online Context Compact** | Completed plan steps become candidate points for Pi's native compaction, subject to economic and window-pressure checks; after a successful compaction, Pi continues the task in a new turn. |
 | Commands | **Command Yield** | A command that outlives its foreground deadline returns what it printed plus a live handle, and keeps running; `exec_wait` collects only what it prints next. |
 | Exploration | **Scoped Exploration** | `explore` answers one question about the project in a separate, discarded context and returns a short answer whose every citation is checked against the file before delivery. |
+| Accounting | **Usage Report** | `sol_pi_usage` reads Pi's own session records and a metadata-only local ledger of SoL-Pi's auxiliary calls, separating reported tokens and Pi cost estimates from explicit unknowns; it makes no model call and records no prompts or credentials. |
 
 The mechanisms share four rules:
 
@@ -134,6 +135,8 @@ Command Yield writes nothing to disk. A yielded command's output is held in memo
 Online Context Compact stores its state in Pi's session log. After a successful compaction, it starts a new turn and automatically continues the active task. Cancelling the run or exiting Pi does not trigger automatic continuation.
 
 Evidence-Preserving Reducer may send eligible diagnostic-log content to its configured reducer model using Pi-managed authentication. Scoped Exploration may send project file content to its configured explorer model the same way, and keeps a full local transcript of every exploration. Review [SECURITY.md](SECURITY.md) before enabling either one. Do not enable them for content that must remain local.
+
+Usage Report is active whenever any mechanism is enabled. It reads Pi's own session records and appends a metadata-only ledger at `<session-directory>/sol-pi/<session-id>/usage.jsonl` for the reducer and explorer calls SoL-Pi dispatches. That ledger stores only route, status, numeric token counts, Pi's recorded cost estimate, and duration; it never records prompts, responses, credentials, or error text. The `sol_pi_usage` tool makes no model call and reports Pi cost estimates, not invoices or a net-savings calculation, with unknown usage and unknown cost counted explicitly.
 
 ## Documentation
 

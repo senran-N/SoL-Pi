@@ -1,6 +1,6 @@
 # Pi Compatibility
 
-SoL-Pi is developed and tested against `@earendil-works/pi-coding-agent` 0.85.1. On that release the full test suite, type checking, package inspection, and the public API check pass, and nothing in the suite is skipped: a guard that would otherwise need a privileged filesystem operation uses an equivalent one the platform does allow, so it is exercised rather than stepped over. The suite is 28 files and 236 tests at the time of writing.
+SoL-Pi is developed and tested against `@earendil-works/pi-coding-agent` 0.85.1. On that release the full test suite, type checking, package inspection, and the public API check pass, and nothing in the suite is skipped: a guard that would otherwise need a privileged filesystem operation uses an equivalent one the platform does allow, so it is exercised rather than stepped over. The suite is 30 files and 248 tests at the time of writing.
 
 Compatibility with the earlier 0.84.2 release rests on a check made before the mechanisms were extended and has not been re-verified since, so treat it as historical rather than a current guarantee. Earlier checks likewise covered the public API surface of Pi 0.81.1, the base used by the original Pi fork. The runtime range is deliberately expressed as a peer dependency because Pi owns installation and upgrade of its packages; it is not a guarantee for every Pi version.
 
@@ -9,6 +9,7 @@ SoL-Pi imports only public package exports:
 - `createEditToolDefinition`
 - `createWriteToolDefinition`
 - `createBashToolDefinition`
+- `withFileMutationQueue` for the per-file append serialization the usage ledger shares with Action Fusion
 - extension types and `ExtensionAPI.registerTool`
 - `context`, `before_provider_request`, `tool_result`, `turn_end`, `agent_settled`, and `session_before_tree` extension events
 - native compaction events, `ExtensionContext.getContextUsage()`, and `ExtensionContext.compact()`
@@ -60,6 +61,14 @@ Pi reports the session as idle while an extension-requested manual compaction is
 Online Context Compact reads `ExtensionContext.getContextUsage()` for both the context window and the provider-counted context size. When Pi reports no size — as it does between a compaction and the next answered request — the boundary falls back to its own estimate.
 
 The standalone entry passes `cacheWriteReadRatio` from `sol-pi.json` directly into Online Context Compact's economic check. It does not inspect model price metadata. Changing models during a session does not change the ratio; users who want a different decision policy update the configuration and start a new session.
+
+A window reset stores the full structured checkpoint on the native compaction entry under `details.solPiWindow.checkpoint`, so the short handoff fragment can stay bounded while the complete plan, progress, notes index, and every user directive remain recoverable. `history_read` reads that checkpoint back by the synthetic id `checkpoint-wN` and pages any recorded entry by UTF-8 byte offset (`offset`/`limit`, character-boundary validated, `next_offset` until null). Unpaid cache-rebuild debt is carried across explicit resets and window-protection overrides rather than zeroed on `fromExtension`, because `fromExtension` describes who supplied the summary, not who paid to rebuild the cache.
+
+## Usage Accounting
+
+Usage accounting is read-only and local. The `sol_pi_usage` tool makes no model call: it reads Pi's own session entries for main-model, native-summary, and reset rows, and a metadata-only auxiliary ledger at `<sessionDir>/sol-pi/<sessionId>/usage.jsonl` for the reducer and explorer calls SoL-Pi itself dispatches. The ledger stores only route, status, numeric token counts, Pi's recorded cost estimate, and duration. It never records prompts, responses, credentials, headers, base URLs, or error text; the append path reuses `withFileMutationQueue` for the same per-file serialization Action Fusion uses.
+
+Each auxiliary call writes a `pending` intent before dispatch and a terminal record after, so a crash or a failed final write leaves an explicit unknown rather than an erased call. A replayed start never overwrites a terminal outcome, and duplicated ledger lines reduce to one record on read. Missing usage, all-zero usage on an interrupted call, and zero or absent prices are reported as unknown, never as free. The report separates reported tokens from known cost estimates and from unknown-cost and unknown-usage counts, and states in its own `limitations` that these are Pi estimates, not invoices and not a net-savings calculation. Forked sessions may copy main history but keep a separate auxiliary ledger, so per-session totals must not be summed as a bill.
 
 ## Interactive TUI
 

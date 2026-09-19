@@ -14,6 +14,7 @@
 import type { Api, AssistantMessage, Context, Model, ProviderStreamOptions } from "@earendil-works/pi-ai";
 import { complete as completeCompat } from "@earendil-works/pi-ai/compat";
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
+import { trackModelCall } from "../../usage/ledger.ts";
 import type { ExplorationConfig } from "./config.ts";
 
 export type CompatComplete = typeof completeCompat;
@@ -63,42 +64,49 @@ export type ExplorerCall = (
 
 export const callExplorer: ExplorerCall = async (config, systemPrompt, turns, context, signal) => {
 	const registry = context.modelRegistry as unknown as CompatibleModelRegistry;
-	const model = registry.find?.(config.explorerProvider, config.explorerModel);
-	if (!model) {
-		throw new ExplorerModelUnavailableError(
-			`Explorer model is unavailable: ${config.explorerProvider}/${config.explorerModel}`,
-		);
-	}
+	const response = await trackModelCall(context, "explorer", { provider: config.explorerProvider, model: config.explorerModel }, async (dispatched) => {
+		const model = registry.find?.(config.explorerProvider, config.explorerModel);
+		if (!model) {
+			throw new ExplorerModelUnavailableError(
+				`Explorer model is unavailable: ${config.explorerProvider}/${config.explorerModel}`,
+			);
+		}
 
-	const requestContext: Context = {
-		systemPrompt,
-		messages: turns.map((turn) => ({
-			role: turn.role,
-			content: [{ type: "text" as const, text: turn.text }],
-			timestamp: Date.now(),
-		})),
-	} as Context;
-	const requestOptions = {
-		cacheRetention: "none" as const,
-		maxTokens: Math.min(config.maxOutputTokens, model.maxTokens),
-		signal,
-		timeoutMs: config.timeoutMs,
-	};
+		const requestContext: Context = {
+			systemPrompt,
+			messages: turns.map((turn) => ({
+				role: turn.role,
+				content: [{ type: "text" as const, text: turn.text }],
+				timestamp: Date.now(),
+			})),
+		} as Context;
+		const requestOptions = {
+			cacheRetention: "none" as const,
+			maxTokens: Math.min(config.maxOutputTokens, model.maxTokens),
+			signal,
+			timeoutMs: config.timeoutMs,
+		};
 
-	let response: AssistantMessage;
-	if (typeof registry.complete === "function") {
-		response = await registry.complete(model, requestContext, requestOptions);
-	} else {
+		if (typeof registry.complete === "function") {
+			signal.throwIfAborted();
+			dispatched();
+			return registry.complete(model, requestContext, requestOptions);
+		}
 		const auth = await registry.getApiKeyAndHeaders(model);
 		if (!auth.ok) throw new Error(auth.error);
 		const legacyModel = auth.baseUrl ? { ...model, baseUrl: auth.baseUrl } : model;
 		const headers = stringHeaders(auth.headers);
-		response = await completeCompat(legacyModel, requestContext, {
+		signal.throwIfAborted();
+		dispatched();
+		return completeCompat(legacyModel, requestContext, {
 			...requestOptions,
 			...(auth.apiKey === undefined ? {} : { apiKey: auth.apiKey }),
 			...(headers === undefined ? {} : { headers }),
 			...(auth.env === undefined ? {} : { env: auth.env }),
 		});
+	}, signal);
+	if (response.stopReason !== "stop" && response.stopReason !== "length") {
+		throw new Error(`Explorer model call ended with ${response.stopReason}; consult sol_pi_usage for recorded usage.`);
 	}
 	return responseText(response);
 };

@@ -55,6 +55,8 @@ export type HistorySearchInput = {
 export type HistoryReadInput = {
 	readonly toolCallId: string;
 	readonly id: string;
+	readonly offset: number | undefined;
+	readonly limit: number | undefined;
 	readonly signal: AbortSignal | undefined;
 	readonly context: ExtensionContext;
 };
@@ -302,14 +304,18 @@ export function registerOnlineTools(pi: ExtensionAPI, handlers: OnlineToolHandle
 	pi.registerTool({
 		name: "history_read",
 		label: "Read session history",
-		description: "Read one recorded session entry in full by the id returned from history_search. Read-only and bounded.",
+		description: "Read a recorded session entry or checkpoint-wN. Read-only UTF-8 byte pages; follow next_offset until null to recover the full text.",
 		promptSnippet: "Read one earlier session entry",
 		promptGuidelines: ["Use history_read instead of guessing what an earlier entry said."],
 		renderShell: "self",
-		parameters: Type.Object({ id: Type.String({ minLength: 1, maxLength: 128 }) }, { additionalProperties: false }),
+		parameters: Type.Object({
+			id: Type.String({ minLength: 1, maxLength: 128 }),
+			offset: Type.Optional(Type.Integer({ minimum: 0, description: "UTF-8 byte offset returned as next_offset; default 0." })),
+			limit: Type.Optional(Type.Integer({ minimum: 128, maximum: 24_000, description: "Page byte budget, default 24000." })),
+		}, { additionalProperties: false }),
 		executionMode: "sequential",
 		execute: async (toolCallId, params, signal, _onUpdate, context) =>
-			await handlers.historyRead({ toolCallId, id: params.id, signal, context }),
+			await handlers.historyRead({ toolCallId, id: params.id, offset: params.offset, limit: params.limit, signal, context }),
 		renderCall(params, theme) {
 			return renderContextTool(theme, `read history entry ${params.id}`, HISTORY_SAVING);
 		},

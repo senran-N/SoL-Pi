@@ -13,9 +13,9 @@
  * exactly the kind of sentence that does not survive that, and it is also the
  * one whose loss is most expensive: the model does not know it dropped it.
  *
- * So two lines are quoted rather than summarized: the original assignment, and
- * the most recent thing the user said. The rest of the session log stays
- * reachable through history_search.
+ * The compact preview quotes the task and latest instruction. The full handoff
+ * also references every user turn on this branch; no heuristic decides that an
+ * intermediate constraint is obsolete.
  *
  * Pure functions only; the extension wires them to Pi's lifecycle.
  */
@@ -56,15 +56,24 @@ function userMessageText(entry: SessionEntry): string | undefined {
 	if (entry.type !== "message") return undefined;
 	const message = entry.message as { role?: string; content?: unknown };
 	if (message.role !== "user") return undefined;
-	const text = textFromContent(message.content).trim();
-	return text.length > 0 ? text : undefined;
+	const text = textFromContent(message.content);
+	return text.trim().length > 0 ? text : undefined;
+}
+
+export type UserReference = { readonly id: string; readonly text: string };
+
+export function collectUserReferences(entries: readonly SessionEntry[]): readonly UserReference[] {
+	return entries.flatMap((entry) => {
+		const text = userMessageText(entry);
+		return text === undefined ? [] : [{ id: entry.id, text }];
+	});
 }
 
 export function collectUserDirectives(entries: readonly SessionEntry[]): UserDirectives {
 	let task: string | undefined;
 	let latest: string | undefined;
 	for (const entry of entries) {
-		const text = userMessageText(entry);
+		const text = userMessageText(entry)?.trim();
 		if (text === undefined) continue;
 		task ??= text;
 		latest = text;

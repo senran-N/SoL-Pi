@@ -14,6 +14,7 @@ import {
 	createPowerShellToolDefinition,
 	createWriteToolDefinition,
 	getAgentDir,
+	withFileMutationQueue,
 } from "@earendil-works/pi-coding-agent";
 import { complete as completeCompat } from "@earendil-works/pi-ai/compat";
 
@@ -26,6 +27,7 @@ for (const [name, value] of Object.entries({
 	createWriteToolDefinition,
 	getApiKeyAndHeaders: ModelRegistry.prototype.getApiKeyAndHeaders,
 	getAgentDir,
+	withFileMutationQueue,
 	piAiCompatComplete: completeCompat,
 	sessionManagerGetSessionDir: SessionManager.prototype.getSessionDir,
 	sessionManagerGetSessionId: SessionManager.prototype.getSessionId,

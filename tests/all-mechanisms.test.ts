@@ -89,6 +89,7 @@ describe("SoL-Pi entrypoint", () => {
 			"history_search",
 			"history_read",
 			"explore",
+			"sol_pi_usage",
 		]);
 		expect([...pi.handlers.keys()].sort()).toEqual([
 			"agent_settled",
@@ -117,7 +118,7 @@ describe("SoL-Pi entrypoint", () => {
 		await pi.emit("session_start", { type: "session_start" }, ctx);
 
 		expect(loader).toHaveBeenCalledOnce();
-		expect(pi.registeredTools.map((tool) => tool.name)).toEqual(["obs_recall"]);
+		expect(pi.registeredTools.map((tool) => tool.name)).toEqual(["obs_recall", "sol_pi_usage"]);
 		expect([...pi.handlers.keys()].sort()).toEqual(["context", "session_start"]);
 	});
 

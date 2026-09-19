@@ -11,6 +11,7 @@ import { registerEvidencePreservingReducer } from "./extensions/evidence-preserv
 import { registerObservationPack } from "./extensions/observation-pack/index.ts";
 import { registerOnlineContextCompact } from "./extensions/online-context-compact/index.ts";
 import { registerScopedExploration } from "./extensions/scoped-exploration/index.ts";
+import { registerUsageReport } from "./usage/index.ts";
 
 export function registerConfiguredFeatures(pi: ExtensionAPI, config: SolPiConfig): void {
 	/*
@@ -39,6 +40,8 @@ export function registerConfiguredFeatures(pi: ExtensionAPI, config: SolPiConfig
 			maxSteps: config.scopedExplorationMaxSteps,
 		});
 	}
+	if (config.actionFusion || config.observationPack || config.evidencePreservingReducer ||
+		config.onlineContextCompact || config.commandYield || config.scopedExploration) registerUsageReport(pi);
 }
 
 export type SolPiConfigLoader = (ctx: ExtensionContext) => SolPiConfig;

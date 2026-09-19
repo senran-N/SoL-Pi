@@ -6,6 +6,7 @@
 import type { Api, AssistantMessage, Context, Model, ProviderStreamOptions } from "@earendil-works/pi-ai";
 import { complete as completeCompat } from "@earendil-works/pi-ai/compat";
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
+import { trackModelCall } from "../../usage/ledger.ts";
 import type { ArchiveObject } from "./archive.ts";
 import type { ReducerConfig } from "./config.ts";
 import { reducerInput, reducerInstructions } from "./receipt.ts";
@@ -113,41 +114,45 @@ export async function callReducer(
 	compatComplete: CompatComplete = completeCompat,
 ): Promise<ProviderResult> {
 	const registry = context.modelRegistry as unknown as CompatibleModelRegistry;
-	const model = resolveReducerModel(config, registry);
 	const operation = operationSignal(context.signal, config.timeoutMs);
 	try {
-		const requestContext = {
-			systemPrompt: reducerInstructions(),
-			messages: [
-				{
-					role: "user" as const,
-					content: [{ type: "text" as const, text: reducerInput(command, isError, archive, body) }],
-					timestamp: Date.now(),
-				},
-			],
-		};
-		const requestOptions = {
-			cacheRetention: "none" as const,
-			maxTokens: Math.min(config.maxOutputTokens, model.maxTokens),
-			sessionId: config.runId,
-			signal: operation.signal,
-			timeoutMs: config.timeoutMs,
-		};
-		let response: AssistantMessage;
-		if (typeof registry.complete === "function") {
-			response = await registry.complete(model, requestContext, requestOptions);
-		} else {
+		const response = await trackModelCall(context, "reducer", { provider: config.reducerProvider, model: config.reducerModel }, async (dispatched) => {
+			const model = resolveReducerModel(config, registry);
+			const requestContext = {
+				systemPrompt: reducerInstructions(),
+				messages: [
+					{
+						role: "user" as const,
+						content: [{ type: "text" as const, text: reducerInput(command, isError, archive, body) }],
+						timestamp: Date.now(),
+					},
+				],
+			};
+			const requestOptions = {
+				cacheRetention: "none" as const,
+				maxTokens: Math.min(config.maxOutputTokens, model.maxTokens),
+				sessionId: config.runId,
+				signal: operation.signal,
+				timeoutMs: config.timeoutMs,
+			};
+			if (typeof registry.complete === "function") {
+				operation.signal.throwIfAborted();
+				dispatched();
+				return registry.complete(model, requestContext, requestOptions);
+			}
 			const auth = await registry.getApiKeyAndHeaders(model);
 			if (!auth.ok) throw new Error(auth.error);
 			const legacyModel = auth.baseUrl ? { ...model, baseUrl: auth.baseUrl } : model;
 			const headers = stringHeaders(auth.headers);
-			response = await compatComplete(legacyModel, requestContext, {
+			operation.signal.throwIfAborted();
+			dispatched();
+			return compatComplete(legacyModel, requestContext, {
 				...requestOptions,
 				...(auth.apiKey === undefined ? {} : { apiKey: auth.apiKey }),
 				...(headers === undefined ? {} : { headers }),
 				...(auth.env === undefined ? {} : { env: auth.env }),
 			});
-		}
+		}, operation.signal);
 		return {
 			errorMessage: response.errorMessage,
 			model: response.model,

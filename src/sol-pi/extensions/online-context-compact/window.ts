@@ -13,7 +13,7 @@
  *
  * Pure functions only; the extension wires them to Pi's lifecycle.
  */
-import { DIRECTIVE_MAX_LINE_BYTES, type UserDirectives } from "./directives.ts";
+import { DIRECTIVE_MAX_LINE_BYTES, type UserDirectives, type UserReference } from "./directives.ts";
 import type { PlanStep } from "./plan.ts";
 import type { ProgressSummary } from "./state.ts";
 
@@ -60,6 +60,8 @@ export type WindowResetInput = {
 	readonly notesIndex?: readonly string[];
 	/** The user's own words, quoted rather than summarized. */
 	readonly directives?: UserDirectives;
+	/** Full branch user messages with source ids, persisted in compaction details. */
+	readonly userReferences?: readonly UserReference[];
 };
 
 export type WindowModeInput = {
@@ -108,7 +110,9 @@ export function formatWindowFragment(input: WindowResetInput): string {
 	const open = `<${WINDOW_TAG} ${attributes.join(" ")}>`;
 	const close = `</${WINDOW_TAG}>`;
 
-	return renderFragment(open, close, sanitize(WINDOW_CONTINUITY_INSTRUCTION), [
+	const recovery = input.userReferences === undefined ? "" :
+		`\nFull checkpoint: history_read id="checkpoint-w${input.windowNumber}". Read it before acting; follow next_offset to recover omitted state and all ${input.userReferences.length} user instructions (source ids included).`;
+	return renderFragment(open, close, sanitize(WINDOW_CONTINUITY_INSTRUCTION) + recovery, [
 		{ lines: directiveLines(input.directives), reservedBytes: 0 },
 		{ lines: planLines(input.plan), reservedBytes: PLAN_RESERVED_BYTES },
 		{ lines: progressLines(input.progress), reservedBytes: PROGRESS_RESERVED_BYTES },
@@ -138,8 +142,9 @@ function directiveLines(directives: UserDirectives | undefined): readonly string
 function planLines(plan: readonly PlanStep[]): readonly string[] {
 	if (plan.length === 0) return [];
 	const lines = ["", "Plan:"];
-	for (const step of plan) {
-		lines.push(`- [${step.status}] ${sanitize(step.id)}: ${sanitize(step.goal)}`);
+	const priority = { in_progress: 0, pending: 1, completed: 2 };
+	for (const step of [...plan].sort((a, b) => priority[a.status] - priority[b.status])) {
+		lines.push(`- [${step.status}] ${sanitize(step.id, 80)}: ${sanitize(step.goal, 320)}`);
 	}
 	return lines;
 }
@@ -147,16 +152,16 @@ function planLines(plan: readonly PlanStep[]): readonly string[] {
 function progressLines(progress: readonly ProgressSummary[]): readonly string[] {
 	if (progress.length === 0) return [];
 	const lines = ["", "Recorded progress:"];
-	for (const summary of progress) {
+	for (const summary of [...progress].reverse()) {
 		lines.push(`- ${sanitize(summary.stepId)}: ${sanitize(summary.goal)}`);
 		const files = sanitizeAll(summary.filesChanged);
 		const verification = sanitizeAll(summary.verification);
 		const decisions = sanitizeAll(summary.decisions);
 		const nextWork = sanitizeAll(summary.nextWork);
-		if (files.length > 0) lines.push(`  files: ${files.join(", ")}`);
-		if (verification.length > 0) lines.push(`  verification: ${verification.join("; ")}`);
-		if (decisions.length > 0) lines.push(`  decisions: ${decisions.join("; ")}`);
-		if (nextWork.length > 0) lines.push(`  next: ${nextWork.join("; ")}`);
+		if (nextWork.length > 0) lines.push(`  next: ${sanitize(nextWork.join("; "))}`);
+		if (decisions.length > 0) lines.push(`  decisions: ${sanitize(decisions.join("; "))}`);
+		if (verification.length > 0) lines.push(`  verification: ${sanitize(verification.join("; "))}`);
+		if (files.length > 0) lines.push(`  files: ${sanitize(files.join(", "))}`);
 	}
 	return lines;
 }

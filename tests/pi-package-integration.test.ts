@@ -31,6 +31,7 @@ it("loads the package entrypoint and executes fused tools in an all-enabled Pi s
 			evidencePreservingReducer: true,
 			onlineContextCompact: true,
 			commandYield: true,
+			scopedExploration: true,
 		}));
 		const faux = fauxProvider({ provider: "sol-pi-package-test", api: "sol-pi-package-test-api" });
 		faux.setResponses([
@@ -42,6 +43,7 @@ it("loads the package entrypoint and executes fused tools in an all-enabled Pi s
 			fauxAssistantMessage(fauxToolCall("update_plan", {
 				steps: [{ id: "verify", goal: "verify the package", status: "in_progress" }],
 			}), { stopReason: "toolUse" }),
+			fauxAssistantMessage(fauxToolCall("sol_pi_usage", {}), { stopReason: "toolUse" }),
 			fauxAssistantMessage("package smoke complete"),
 		]);
 		const settingsManager = SettingsManager.inMemory({
@@ -76,7 +78,7 @@ it("loads the package entrypoint and executes fused tools in an all-enabled Pi s
 		const errors: unknown[] = [];
 		await session.bindExtensions({ onError: (error) => errors.push(error) });
 		expect(session.getActiveToolNames()).toEqual(
-			expect.arrayContaining(["edit", "write", "obs_recall", "update_plan", "exec_wait", "exec_list", "exec_kill"]),
+			expect.arrayContaining(["edit", "write", "obs_recall", "update_plan", "exec_wait", "exec_list", "exec_kill", "explore", "sol_pi_usage"]),
 		);
 		const solPi = resourceLoader
 			.getExtensions()
@@ -92,7 +94,9 @@ it("loads the package entrypoint and executes fused tools in an all-enabled Pi s
 		const toolResults = sessionManager.getBranch().flatMap((entry) =>
 			entry.type === "message" && entry.message.role === "toolResult" ? [entry.message] : [],
 		);
-		expect(toolResults).toHaveLength(2);
+		expect(toolResults).toHaveLength(3);
+		const usageResult = toolResults.find((result) => result.toolName === "sol_pi_usage");
+		expect(usageResult?.details).toMatchObject({ schema: "sol-pi-usage-report/1", totals: { records: 3 } });
 		expect(toolResults.every((result) => !result.isError)).toBe(true);
 		const writeResult = toolResults.find((result) => result.toolName === "write");
 		const observation = writeResult?.content.flatMap((block) => block.type === "text" ? [block.text] : []).join("\n");
@@ -101,7 +105,7 @@ it("loads the package entrypoint and executes fused tools in an all-enabled Pi s
 		expect(await readFile(join(cwd, "result.txt"), "utf8")).toBe("package integration passed\n");
 		expect(session.getLastAssistantText()).toBe("package smoke complete");
 		expect(session.isIdle).toBe(true);
-		expect(faux.state.callCount).toBe(3);
+		expect(faux.state.callCount).toBe(4);
 		expect(errors).toEqual([]);
 	} finally {
 		session?.dispose();

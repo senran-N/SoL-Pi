@@ -19,7 +19,7 @@ import {
 	decideCompaction,
 	type CompactionDecision,
 } from "./economics.ts";
-import { collectUserDirectives } from "./directives.ts";
+import { collectUserDirectives, collectUserReferences } from "./directives.ts";
 import { analyzePlanTransition, formatPlanSnapshot, parsePlanSteps } from "./plan.ts";
 import {
 	appendOnlineState,
@@ -40,7 +40,7 @@ import {
 } from "./history.ts";
 import { appendNote, listNotes, readNote, readNotesIndex, writeNote } from "./notes.ts";
 import { registerOnlineTools, type PlanUpdateInput } from "./tools.ts";
-import { formatWindowFragment, selectCompactionMode, windowIdentity } from "./window.ts";
+import { formatWindowFragment, selectCompactionMode, windowIdentity, type WindowResetInput } from "./window.ts";
 import { appendWindowLedger } from "./window-ledger.ts";
 
 export const DEFAULT_KEEP_RECENT_TOKENS = 20_000;
@@ -63,7 +63,7 @@ type PendingBoundary = { readonly toolCallId: string };
 type SelectedCompaction = { readonly decision: CompactionDecision };
 type CacheDebt = { readonly debtTokens: number; readonly repaymentTokens: number };
 type PendingContinuation = { readonly promise: Promise<void>; readonly resolve: () => void };
-type PendingReset = { readonly windowNumber: number; readonly fragment: string };
+type PendingReset = { readonly windowNumber: number; readonly fragment: string; readonly checkpoint: WindowResetInput };
 
 export function resolveKeepRecentTokens(value: number | undefined): number {
 	const resolved = value ?? DEFAULT_KEEP_RECENT_TOKENS;
@@ -412,12 +412,16 @@ export function createOnlineContextCompactExtension(options: OnlineContextCompac
 			historyRead: async (input) => {
 				ensureRestored(input.context);
 				if (input.signal?.aborted) throw new Error("History read was aborted");
-				const found = readHistoryEntry(input.context.sessionManager.getBranch(), input.id);
+				const found = readHistoryEntry(input.context.sessionManager.getBranch(), input.id, input.offset, input.limit);
 				if (!found) throw new Error(`Unknown history entry id "${input.id}". Use history_search to find an id.`);
-				return result(`[${found.kind}] #${found.index}\n${found.text}`, {
+				const next = found.nextOffset === null ? "" : `\nContinue with history_read id="${input.id}" offset=${found.nextOffset}.`;
+				return result(`[${found.kind}] #${found.index} (bytes ${found.offset}-${found.endOffset} of ${found.totalBytes})\n${found.text}${next}`, {
 					op: "history_read",
 					id: input.id,
 					kind: found.kind,
+					offset: found.offset,
+					next_offset: found.nextOffset,
+					total_bytes: found.totalBytes,
 					bytes: Buffer.byteLength(found.text, "utf8"),
 				});
 			},
@@ -541,24 +545,26 @@ export function createOnlineContextCompactExtension(options: OnlineContextCompac
 			// explicit reset is honored even without priced savings.
 			if (requestedReset || selectCompactionMode({ plan: state.plan, progress: state.pendingProgress }) === "reset") {
 				const windowNumber = nextWindowNumber();
-				pendingReset = {
+				const checkpoint: WindowResetInput = {
 					windowNumber,
-					fragment: formatWindowFragment({
-						windowNumber,
-						plan: state.plan,
-						progress: state.pendingProgress,
-						notesIndex: await noteIndex(context),
-						directives: collectUserDirectives(context.sessionManager.getBranch()),
-					}),
+					plan: state.plan,
+					progress: state.pendingProgress,
+					notesIndex: await noteIndex(context),
+					directives: collectUserDirectives(context.sessionManager.getBranch()),
+					userReferences: collectUserReferences(context.sessionManager.getBranch()),
 				};
+				pendingReset = { windowNumber, checkpoint, fragment: formatWindowFragment(checkpoint) };
 			}
 
-			activeDebt = pending
-				? {
-						debtTokens: pending.decision.writeTokens * (pending.decision.incrementalCacheCostRatio ?? 0),
-						repaymentTokens: Math.max(0, pending.decision.archiveTokens - pending.decision.memoTokens),
-					}
-				: { debtTokens: 0, repaymentTokens: 0 };
+			// No summary model call does not mean no cache rebuild. Carry unpaid
+			// debt even for explicit resets and window-protection overrides.
+			const writeTokens = pending?.decision.writeTokens ?? contextTokens(context);
+			const memoTokens = pendingReset ? tokenEstimate(pendingReset.fragment) : DEFAULT_NATIVE_SUMMARY_TOKEN_ESTIMATE;
+			activeDebt = {
+				debtTokens: state.cacheDebtTokens + writeTokens * Math.max(0, (cacheWriteReadRatio ?? 1) - 1),
+				repaymentTokens: Math.max(0,
+					(pending?.decision.archiveTokens ?? Math.max(0, writeTokens - tokenEstimate(context.getSystemPrompt()) - keepRecentTokens)) - memoTokens),
+			};
 			// A reset carries no priced decision, so measure what it is about to
 			// archive the same way turn_end does; otherwise it reports no savings at
 			// all.
@@ -681,6 +687,7 @@ export function createOnlineContextCompactExtension(options: OnlineContextCompac
 							windowNumber,
 							windowId: identity.windowId,
 							previousWindowId: identity.previousWindowId,
+							checkpoint: intent.checkpoint,
 						},
 					},
 				},
@@ -691,7 +698,9 @@ export function createOnlineContextCompactExtension(options: OnlineContextCompac
 			ensureRestored(context);
 			state = recordCompaction(
 				state,
-				event.fromExtension || !activeDebt ? { debtTokens: 0, repaymentTokens: 0 } : activeDebt,
+				// fromExtension describes who supplied the summary, not who paid
+				// for the rebuild. Only our in-flight request owns activeDebt.
+				activeDebt ?? { debtTokens: state.cacheDebtTokens, repaymentTokens: 0 },
 			);
 			save();
 			pendingBoundary = undefined;
