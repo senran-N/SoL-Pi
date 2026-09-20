@@ -14,6 +14,7 @@ import {
 	createEvidencePreservingReducerExtension,
 	DIAGNOSTIC_COMMAND,
 	loadReducerConfig,
+	reduceToolResult,
 	REDUCER_RECEIPT_SCHEMA,
 } from "../src/sol-pi/extensions/evidence-preserving-reducer/index.ts";
 import { archiveBody } from "../src/sol-pi/extensions/evidence-preserving-reducer/archive.ts";
@@ -21,6 +22,8 @@ import {
 	callReducer,
 	type CompatComplete,
 } from "../src/sol-pi/extensions/evidence-preserving-reducer/provider.ts";
+import { ReceiptCache } from "../src/sol-pi/extensions/evidence-preserving-reducer/cache.ts";
+import { readUsageLedger } from "../src/sol-pi/usage/ledger.ts";
 import { runtimeRoot } from "../src/sol-pi/runtime-paths.ts";
 import { FakePi, FakeSessionManager, fakeContext } from "./helpers.ts";
 
@@ -302,6 +305,215 @@ describe("evidence-preserving reducer", () => {
 		expect(notify.mock.calls[0]?.[0]).toMatch(
 			/^⚡ SoL-Pi · Luna Delegating\nMoney saved · .+ removed from future prompts$/u,
 		);
+	});
+
+	it("reuses an accepted receipt without another provider call and projects current result metadata", async () => {
+		const root = await storeRoot();
+		const body = `ERROR unchanged failure\n${"same diagnostic\n".repeat(400)}`;
+		const complete = vi.fn(modelComplete(body, (input) => ({
+			schema: REDUCER_RECEIPT_SCHEMA, source_sha256: sourceHash(input), status: "failure", uncertain: false,
+			evidence: [{ kind: "failure", quote: "ERROR unchanged failure" }],
+		})));
+		const { context, manager, pi } = load(root, complete);
+		const first = await pi.emit("tool_result", bashEvent(body), context);
+		const second = await pi.emit("tool_result", bashEvent(body, { toolCallId: "call-2", details: { current: true } }), context) as {
+			content: { type: string; text: string }[]; details: Record<string, unknown>;
+		};
+		expect(first).toBeDefined();
+		expect(second.details).toMatchObject({ current: true, evidencePreservingReducer: { cacheHit: true } });
+		expect(second.content[0]?.text).toContain("reducer_call=skipped_verified_cache");
+		expect(second.content[0]?.text).toContain("ERROR unchanged failure");
+		expect(complete).toHaveBeenCalledOnce();
+		expect(manager.customEntryData()).toContainEqual(expect.objectContaining({ kind: "cache_hit", toolCallId: "call-2" }));
+		expect(manager.customEntryData().filter((row) => row.kind === "provider_response")).toHaveLength(1);
+		expect(manager.customEntryData().filter((row) => row.kind === "applied").at(-1)).not.toHaveProperty("usage");
+		const ledger = await readUsageLedger(runtimeRoot(context));
+		expect(ledger.invalidRecords).toBe(0);
+		expect(ledger.records).toHaveLength(1);
+		expect(second.content[0]?.text).not.toContain("\nreducer_total_tokens=");
+	});
+
+	it.each(["command", "status", "source"] as const)("misses the cache when %s changes", async (changed) => {
+		const root = await storeRoot();
+		const body = `ERROR test failed\n${"same diagnostic\n".repeat(400)}`;
+		const complete = vi.fn(modelComplete(body, (input) => ({
+			schema: REDUCER_RECEIPT_SCHEMA, source_sha256: sourceHash(input),
+			status: input.includes("is_error=true") ? "failure" : "success", uncertain: false,
+			evidence: [{ kind: "failure", quote: "ERROR test failed" }],
+		})));
+		const { context, pi } = load(root, complete);
+		await pi.emit("tool_result", bashEvent(body), context);
+		const changedEvent = bashEvent(changed === "source" ? `${body}changed` : body, {
+			input: { command: changed === "command" ? "pytest -v" : "pytest -q" },
+			isError: changed !== "status",
+		});
+		expect(await pi.emit("tool_result", changedEvent, context)).toBeDefined();
+		expect(complete).toHaveBeenCalledTimes(2);
+		await pi.emit("tool_result", changedEvent, context);
+		expect(complete).toHaveBeenCalledTimes(2);
+	});
+
+	it("isolates model routes and output budgets even if a caller shares a cache", async () => {
+		const root = await storeRoot();
+		const body = `ERROR test failed\n${"same diagnostic\n".repeat(400)}`;
+		const complete = vi.fn(modelComplete(body, (input) => ({
+			schema: REDUCER_RECEIPT_SCHEMA, source_sha256: sourceHash(input), status: "failure", uncertain: false,
+			evidence: [{ kind: "failure", quote: "ERROR test failed" }],
+		})));
+		const { context } = load(root, complete, ACTIVE_MODEL, {
+			modelRegistry: {
+				find: (provider: string, id: string) => ({ ...REDUCER_MODEL, provider, id }), complete,
+			} as unknown as ExtensionContext["modelRegistry"],
+		});
+		const config = loadReducerConfig(runtimeRoot(context));
+		const cache = new ReceiptCache();
+		const configs = [config, { ...config, reducerProvider: "other" }, { ...config, reducerModel: "other" },
+			{ ...config, maxOutputTokens: config.maxOutputTokens + 1 }];
+		for (const candidate of configs) {
+			expect(await reduceToolResult(() => {}, candidate, bashEvent(body), context, cache)).toBeDefined();
+			await reduceToolResult(() => {}, candidate, bashEvent(body), context, cache);
+		}
+		expect(complete).toHaveBeenCalledTimes(configs.length);
+	});
+
+	it("drops retained receipts on session switches and extension reloads", async () => {
+		const root = await storeRoot();
+		const body = `ERROR test failed\n${"same diagnostic\n".repeat(400)}`;
+		const complete = vi.fn(modelComplete(body, (input) => ({
+			schema: REDUCER_RECEIPT_SCHEMA, source_sha256: sourceHash(input), status: "failure", uncertain: false,
+			evidence: [{ kind: "failure", quote: "ERROR test failed" }],
+		})));
+		const { context, manager, pi } = load(root, complete);
+		for (const id of ["reducer", "other-session", "reducer"]) {
+			manager.sessionId = id;
+			await pi.emit("tool_result", bashEvent(body), context);
+			await pi.emit("tool_result", bashEvent(body), context);
+		}
+		expect(complete).toHaveBeenCalledTimes(3);
+		const reloaded = load(root, complete);
+		await reloaded.pi.emit("tool_result", bashEvent(body), reloaded.context);
+		expect(complete).toHaveBeenCalledTimes(4);
+	});
+
+	it("checks archive integrity before a cache hit and restores a deleted archive", async () => {
+		const root = await storeRoot();
+		const body = `ERROR test failed\n${"same diagnostic\n".repeat(400)}`;
+		const complete = vi.fn(modelComplete(body, (input) => ({
+			schema: REDUCER_RECEIPT_SCHEMA, source_sha256: sourceHash(input), status: "failure", uncertain: false,
+			evidence: [{ kind: "failure", quote: "ERROR test failed" }],
+		})));
+		const { context, manager, pi } = load(root, complete);
+		await pi.emit("tool_result", bashEvent(body), context);
+		const path = String(manager.customEntryData().find((row) => row.kind === "candidate")?.sourcePath);
+		await writeFile(path, "tampered");
+		await expect(pi.emit("tool_result", bashEvent(body), context)).rejects.toThrow("integrity failure");
+		expect(manager.customEntryData().filter((row) => row.kind === "cache_hit")).toHaveLength(0);
+		await rm(path);
+		expect(await pi.emit("tool_result", bashEvent(body), context)).toBeDefined();
+		expect(await readFile(path, "utf8")).toBe(body);
+		expect(complete).toHaveBeenCalledOnce();
+	});
+
+	it("projects a cached receipt into the current fused wrapper without losing failure status", async () => {
+		const root = await storeRoot();
+		const body = `ERROR test failed\n${"same diagnostic\n".repeat(400)}`;
+		const complete = vi.fn(modelComplete(body, (input) => ({
+			schema: REDUCER_RECEIPT_SCHEMA, source_sha256: sourceHash(input), status: "failure", uncertain: false,
+			evidence: [{ kind: "failure", quote: "ERROR test failed" }],
+		})));
+		const { context, pi } = load(root, complete);
+		await pi.emit("tool_result", bashEvent(body, { input: { command: "npm test" } }), context);
+		const result = await pi.emit("tool_result", fusedEvent(body, true), context) as {
+			content: { text: string }[]; isError: boolean; details: Record<string, unknown>;
+		};
+		expect(result.isError).toBe(true);
+		expect(result.content.map((item) => item.text).join("\n")).toContain("Successfully wrote 12 bytes to target.ts");
+		expect(result.content.map((item) => item.text).join("\n")).toContain("[then_run:failed]");
+		expect(result.details).toMatchObject({ patch: "test patch", evidencePreservingReducer: { cacheHit: true } });
+		expect(complete).toHaveBeenCalledOnce();
+	});
+
+	it.each(["exception", "response-error", "bad-quote", "not-smaller"] as const)("does not cache %s fallbacks", async (failure) => {
+		const root = await storeRoot();
+		const body = `ERROR test failed\n${"x".repeat(4500)}`;
+		const responder = modelComplete(body, (input) => ({
+			schema: REDUCER_RECEIPT_SCHEMA, source_sha256: sourceHash(input), status: "failure", uncertain: false,
+			evidence: failure === "not-smaller"
+				? [{ kind: "failure", quote: "ERROR test failed" }, ...Array.from({ length: 11 }, (_, i) => ({ kind: "summary", quote: "x".repeat(590 + i) }))]
+				: [{ kind: "failure", quote: failure === "bad-quote" ? "not in log" : "ERROR test failed" }],
+		}), failure === "response-error" ? "error" : "stop");
+		const complete = vi.fn<Complete>(failure === "exception" ? async () => { throw new Error("failed"); } : responder);
+		const { context, manager, pi } = load(root, complete);
+		expect(await pi.emit("tool_result", bashEvent(body), context)).toBeUndefined();
+		expect(await pi.emit("tool_result", bashEvent(body), context)).toBeUndefined();
+		expect(complete).toHaveBeenCalledTimes(2);
+		expect(manager.customEntryData().filter((row) => row.kind === "cache_hit")).toHaveLength(0);
+	});
+
+	it("does not use a retained receipt after cancellation", async () => {
+		const root = await storeRoot();
+		const body = `ERROR test failed\n${"same diagnostic\n".repeat(400)}`;
+		const complete = vi.fn(modelComplete(body, (input) => ({
+			schema: REDUCER_RECEIPT_SCHEMA, source_sha256: sourceHash(input), status: "failure", uncertain: false,
+			evidence: [{ kind: "failure", quote: "ERROR test failed" }],
+		})));
+		const controller = new AbortController();
+		const { context, manager, pi } = load(root, complete, ACTIVE_MODEL, { signal: controller.signal });
+		await pi.emit("tool_result", bashEvent(body), context);
+		controller.abort();
+		expect(await pi.emit("tool_result", bashEvent(body), context)).toBeUndefined();
+		expect(complete).toHaveBeenCalledOnce();
+		expect(manager.customEntryData().filter((row) => row.kind === "cache_hit")).toHaveLength(0);
+	});
+
+	it("avoids four of five provider calls on identical sequential logs without changing verified evidence", async () => {
+		const body = `ERROR repeated failure\n${"same diagnostic\n".repeat(400)}`;
+		const results: Array<{ calls: number; records: number; evidence: string[] }> = [];
+		for (const enabled of [false, true]) {
+			const root = await storeRoot();
+			const complete = vi.fn(modelComplete(body, (input) => ({
+				schema: REDUCER_RECEIPT_SCHEMA, source_sha256: sourceHash(input), status: "failure", uncertain: false,
+				evidence: [{ kind: "failure", quote: "ERROR repeated failure" }],
+			})));
+			const { context } = load(root, complete);
+			const config = loadReducerConfig(runtimeRoot(context));
+			const cache = enabled ? new ReceiptCache() : undefined;
+			const evidence: string[] = [];
+			for (let index = 0; index < 5; index += 1) {
+				const result = await reduceToolResult(() => {}, config, bashEvent(body), context, cache);
+				expect(result?.isError).toBe(true);
+				const text = result?.content.flatMap((item) => item.type === "text" ? [item.text] : []).join("\n") ?? "";
+				evidence.push(text.split("verified_evidence:\n")[1] ?? "");
+			}
+			results.push({ calls: complete.mock.calls.length, records: (await readUsageLedger(runtimeRoot(context))).records.length, evidence });
+		}
+		expect(results.map(({ calls, records }) => ({ calls, records }))).toEqual([{ calls: 5, records: 5 }, { calls: 1, records: 1 }]);
+		expect(results[1]?.evidence).toEqual(results[0]?.evidence);
+		expect(results[1]?.evidence[0]).toContain("ERROR repeated failure");
+	});
+
+	it("revalidates cached quotes and deletes a rejected entry", async () => {
+		const root = await storeRoot();
+		const body = `ERROR test failed\n${"same diagnostic\n".repeat(400)}`;
+		const complete = vi.fn(modelComplete(body, (input) => ({
+			schema: REDUCER_RECEIPT_SCHEMA, source_sha256: sourceHash(input), status: "failure", uncertain: false,
+			evidence: [{ kind: "failure", quote: "ERROR test failed" }],
+		})));
+		const { context } = load(root, complete);
+		const config = loadReducerConfig(runtimeRoot(context));
+		const cache = new ReceiptCache();
+		await reduceToolResult(() => {}, config, bashEvent(body), context, cache);
+		const get = cache.get.bind(cache);
+		vi.spyOn(cache, "get").mockImplementation((key) => {
+			const cached = get(key);
+			return cached ? { ...cached, outputText: cached.outputText.replace("ERROR test failed", "invented failure") } : undefined;
+		});
+		const journal = vi.fn();
+		expect(await reduceToolResult(journal, config, bashEvent(body), context, cache)).toBeUndefined();
+		expect(journal).toHaveBeenCalledWith("fallback", expect.objectContaining({ reason: "unverifiable-quote", cacheHit: true }));
+		expect(journal.mock.calls.find(([kind]) => kind === "fallback")?.[1]).not.toHaveProperty("usage");
+		expect(await reduceToolResult(journal, config, bashEvent(body), context, cache)).toBeDefined();
+		expect(complete).toHaveBeenCalledTimes(2);
 	});
 
 	it("uses Pi-resolved authentication on a fork-shaped model registry", async () => {

@@ -148,6 +148,7 @@ export function receiptText(
 	archive: ArchiveObject,
 	validated: ValidatedReceipt,
 	provider: ProviderResult,
+	cacheHit = false,
 ): string {
 	const lines = [
 		REDUCER_RECEIPT_PREFIX,
@@ -160,7 +161,9 @@ export function receiptText(
 		`source_artifact=${archive.path}`,
 		`reducer_provider=${provider.provider}`,
 		`reducer_model=${provider.model}`,
-		`reducer_total_tokens=${provider.usage.totalTokens}`,
+		...(cacheHit
+			? ["reducer_call=skipped_verified_cache", `cached_receipt_original_total_tokens=${provider.usage.totalTokens}`]
+			: [`reducer_total_tokens=${provider.usage.totalTokens}`]),
 		"verified_evidence:",
 	];
 	for (const item of validated.evidence) {

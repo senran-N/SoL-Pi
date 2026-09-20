@@ -30,6 +30,7 @@ import { UsageLedgerError } from "../../usage/ledger.ts";
 import { formatSavingsBytes, showSolPiSavings } from "../../tui.ts";
 import { archiveBody, archiveRoot } from "./archive.ts";
 import { reducibleToolResult } from "./candidate.ts";
+import { ReceiptCache } from "./cache.ts";
 import {
 	DIAGNOSTIC_COMMAND,
 	isRecord,
@@ -61,6 +62,7 @@ export async function reduceToolResult(
 	config: ReducerConfig,
 	event: ToolResultEvent,
 	context: ExtensionContext,
+	cache?: ReceiptCache,
 ): Promise<ReducedToolResult | undefined> {
 	const reducible = await reducibleToolResult(event);
 	if (!reducible || !DIAGNOSTIC_COMMAND.test(reducible.command)) return undefined;
@@ -86,9 +88,16 @@ export async function reduceToolResult(
 		sourcePath: archive.path,
 	});
 
+	// Identity includes every input to reduction. Tool-call identity and wrapper
+	// metadata are deliberately excluded: project onto the current result below.
+	const cacheKey = sha256(JSON.stringify([
+		REDUCER_RECEIPT_SCHEMA, config.storeRoot, config.runId,
+		config.reducerProvider, config.reducerModel, config.maxOutputTokens, command, event.isError, archive.hash,
+	]));
+	const cached = context.signal?.aborted ? undefined : cache?.get(cacheKey);
 	let provider: ProviderResult;
 	try {
-		provider = await callReducer(config, command, event.isError, archive, body, context);
+		provider = cached ?? await callReducer(config, command, event.isError, archive, body, context);
 	} catch (error) {
 		// Falling back must not hide an accounting write failure after a paid call.
 		if (error instanceof UsageLedgerError) throw error;
@@ -106,15 +115,19 @@ export async function reduceToolResult(
 		return undefined;
 	}
 
-	journal("provider_response", {
-		toolCallId: event.toolCallId,
-		sourceSha256: archive.hash,
-		provider: provider.provider,
-		model: provider.model,
-		stopReason: provider.stopReason,
-		errorMessage: provider.errorMessage,
-		usage: provider.usage,
-	});
+	if (cached) {
+		journal("cache_hit", { toolCallId: event.toolCallId, sourceSha256: archive.hash });
+	} else {
+		journal("provider_response", {
+			toolCallId: event.toolCallId,
+			sourceSha256: archive.hash,
+			provider: provider.provider,
+			model: provider.model,
+			stopReason: provider.stopReason,
+			errorMessage: provider.errorMessage,
+			usage: provider.usage,
+		});
+	}
 	if (!provider.ok) {
 		journal("fallback", {
 			toolCallId: event.toolCallId,
@@ -128,15 +141,16 @@ export async function reduceToolResult(
 
 	const checked = validateReceipt(provider.outputText, archive, body, event.isError);
 	if (!checked.ok) {
+		cache?.delete(cacheKey);
 		journal("fallback", {
 			toolCallId: event.toolCallId,
 			sourceSha256: archive.hash,
 			reason: checked.reason,
-			usage: provider.usage,
+			...(cached ? { cacheHit: true } : { usage: provider.usage }),
 		});
 		return undefined;
 	}
-	const receipt = receiptText(command, archive, checked.value, provider);
+	const receipt = receiptText(command, archive, checked.value, provider, cached !== undefined);
 	const receiptBytes = Buffer.byteLength(receipt, "utf8");
 	if (receiptBytes >= archive.bytes) {
 		journal("fallback", {
@@ -145,7 +159,7 @@ export async function reduceToolResult(
 			reason: "receipt-not-smaller",
 			receiptBytes,
 			sourceBytes: archive.bytes,
-			usage: provider.usage,
+			...(cached ? { cacheHit: true } : { usage: provider.usage }),
 		});
 		return undefined;
 	}
@@ -158,8 +172,9 @@ export async function reduceToolResult(
 		receiptBytes,
 		evidenceCount: checked.value.evidence.length,
 		uncertain: checked.value.uncertain,
-		usage: provider.usage,
+		...(cached ? { cacheHit: true } : { usage: provider.usage }),
 	});
+	if (!cached) cache?.set(cacheKey, provider);
 	showSolPiSavings(context, "Luna Delegating", formatSavingsBytes(archive.bytes - receiptBytes));
 	return {
 		content: reducible.projectReceipt(receipt),
@@ -174,6 +189,7 @@ export async function reduceToolResult(
 				receiptBytes,
 				evidenceCount: checked.value.evidence.length,
 				uncertain: checked.value.uncertain,
+				cacheHit: cached !== undefined,
 			},
 		},
 	};
@@ -181,7 +197,9 @@ export async function reduceToolResult(
 
 export function createEvidencePreservingReducerExtension(options: EvidencePreservingReducerOptions = {}): ExtensionFactory {
 	return (pi: ExtensionAPI) => {
-		const states = new Map<string, { config: ReducerConfig; journal: Journal }>();
+		// Keep only the current session's state. Switching roots drops retained
+		// receipts instead of multiplying the per-cache bound by visited sessions.
+		let state: { root: string; config: ReducerConfig; journal: Journal; cache: ReceiptCache } | undefined;
 		pi.on("tool_result", (event, context) => {
 			let root: string;
 			try {
@@ -189,13 +207,11 @@ export function createEvidencePreservingReducerExtension(options: EvidencePreser
 			} catch {
 				return undefined;
 			}
-			let state = states.get(root);
-			if (!state) {
+			if (state?.root !== root) {
 				const config = loadReducerConfig(root, options);
-				state = { config, journal: createJournal(pi, config) };
-				states.set(root, state);
+				state = { root, config, journal: createJournal(pi, config), cache: new ReceiptCache() };
 			}
-			return reduceToolResult(state.journal, state.config, event, context);
+			return reduceToolResult(state.journal, state.config, event, context, state.cache);
 		});
 	};
 }
