@@ -8,6 +8,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { AgentMessage } from "@earendil-works/pi-agent-core";
 import type { ToolResultMessage } from "@earendil-works/pi-ai";
+import { fauxAssistantMessage } from "@earendil-works/pi-ai/providers/faux";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
 	createObservationPackExtension,
@@ -201,6 +202,80 @@ describe("observation pack", () => {
 		expect(combined[0]?.[1]).toBe(resultText(second));
 		expect(combined[1]?.[1]).toBe(resultText(second));
 		expect(combined[2]?.[1]).not.toBe(resultText(second));
+	});
+
+	it("does not expand an old placeholder after restart on a shorter branch", async () => {
+		const sessionDir = await sessionRoot();
+		const body = `old branch\n${repeatPastThreshold("stable prefix\n")}`;
+		const message = toolResult(body);
+		const before = await project(observationPackPi(), message, sessionDir, 3);
+		// A restored/branched projection can retain the result without any of
+		// the assistant messages that originally followed it.
+		const after = await project(observationPackPi(), message, sessionDir, 1);
+		expect(after[0]).toBe(before[2]);
+		expect(Buffer.byteLength(after[0]!)).toBeLessThan(Buffer.byteLength(body));
+		expect(resultText(message)).toBe(body);
+	});
+
+	it("resumes the remaining full-send allowance rather than restarting it", async () => {
+		const sessionDir = await sessionRoot();
+		const body = repeatPastThreshold("remaining allowance\n");
+		const message = toolResult(body);
+		expect(await project(observationPackPi(), message, sessionDir, 1)).toEqual([body]);
+		expect(await project(observationPackPi(), message, sessionDir, 1)).toEqual([body]);
+		expect((await project(observationPackPi(), message, sessionDir, 1))[0]).toMatch(/^\[large tool result replaced/u);
+	});
+
+	it.each(["", '\n{"event":"full"'])("persists the remaining allowance after an unterminated ledger tail: %j", async (tail) => {
+		const sessionDir = await sessionRoot();
+		const body = repeatPastThreshold("interrupted ledger\n");
+		const message = toolResult(body);
+		const ledgerPath = join(sessionDir, "sol-pi", SESSION_ID, "observation-pack", "ledger.jsonl");
+		await mkdir(join(sessionDir, "sol-pi", SESSION_ID, "observation-pack"), { recursive: true });
+		await writeFile(ledgerPath, JSON.stringify({ event: "full", id: observationId(message), sendNumber: 1 }) + tail);
+		captureConsoleErrors();
+
+		expect(await project(observationPackPi(), message, sessionDir, 1)).toEqual([body]);
+		// Use a fresh extension again: an in-memory counter cannot make this pass.
+		expect((await project(observationPackPi(), message, sessionDir, 1))[0]).toMatch(/^\[large tool result replaced/u);
+		expect(resultText(message)).toBe(body);
+	});
+
+	it("persists a history-inferred count and keeps a fork independent", async () => {
+		const sessionDir = await sessionRoot();
+		const body = repeatPastThreshold("historical output\n");
+		const message = toolResult(body);
+		const messages = await observationPackPi().emitContext([message, fauxAssistantMessage("seen once")], fakeContext(sessionDir));
+		expect(resultText(messages[0]!)).toBe(body);
+		expect((await project(observationPackPi(), message, sessionDir, 1))[0]).toMatch(/^\[large tool result replaced/u);
+		const fork = fakeContext(new FakeSessionManager([], "fork", sessionDir));
+		expect(resultText((await observationPackPi().emitContext([message], fork))[0]!)).toBe(body);
+	});
+
+	it("retries failed ledger recovery without hiding the original output", async () => {
+		const sessionDir = await sessionRoot();
+		const body = repeatPastThreshold("ledger unavailable\n");
+		const message = toolResult(body);
+		const ledgerPath = join(sessionDir, "sol-pi", SESSION_ID, "observation-pack", "ledger.jsonl");
+		await mkdir(ledgerPath, { recursive: true });
+		const errors = captureConsoleErrors();
+		const pi = observationPackPi();
+		expect(await project(pi, message, sessionDir, 1)).toEqual([body]);
+		expect(errors.length).toBeGreaterThan(0);
+		await rm(ledgerPath, { recursive: true });
+		await writeFile(ledgerPath, JSON.stringify({ event: "placeholder", id: observationId(message) }) + "\n");
+		expect((await project(pi, message, sessionDir, 1))[0]).toMatch(/^\[large tool result replaced/u);
+	});
+
+	it("still verifies stored bytes before reusing a recovered placeholder", async () => {
+		const sessionDir = await sessionRoot();
+		const body = repeatPastThreshold("untampered output\n");
+		const message = toolResult(body);
+		await project(observationPackPi(), message, sessionDir, 3);
+		await writeFile(observationPath(sessionDir, observationId(message)), "x".repeat(Buffer.byteLength(body)));
+		const errors = captureConsoleErrors();
+		expect(await project(observationPackPi(), message, sessionDir, 1)).toEqual([body]);
+		expect(errors.some((error) => error.includes("hash mismatch"))).toBe(true);
 	});
 
 	it("recalls from durable storage after a restart of the extension", async () => {

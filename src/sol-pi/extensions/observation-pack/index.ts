@@ -23,7 +23,7 @@ import { Text } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
 import { runtimeRoot } from "../../runtime-paths.ts";
 import { formatSavingsCount, renderSolPiTool, showSolPiSavings } from "../../tui.ts";
-import { createLedger, type Ledger } from "./ledger.ts";
+import { createLedger, readSendCounts, type Ledger } from "./ledger.ts";
 import {
 	countLines,
 	createObservation,
@@ -50,7 +50,19 @@ const RECALL_LIMITS = {
 
 export function createObservationPackExtension(): ExtensionFactory {
 	return (pi: ExtensionAPI) => {
-		const sentCounts = new Map<string, number>();
+		const countsByRoot = new Map<string, Promise<Map<string, number>>>();
+		const countsFor = (root: string): Promise<Map<string, number>> => {
+			let counts = countsByRoot.get(root);
+			if (!counts) {
+				counts = readSendCounts(join(root, "observation-pack", "ledger.jsonl")).catch((error: unknown) => {
+					// A failed read must not become a permanent empty recovery state.
+					countsByRoot.delete(root);
+					throw error;
+				});
+				countsByRoot.set(root, counts);
+			}
+			return counts;
+		};
 		const ledgers = new Map<string, Ledger>();
 		const ledgerFor = (ctx: ExtensionContext): Ledger => {
 			const root = runtimeRoot(ctx);
@@ -137,6 +149,7 @@ export function createObservationPackExtension(): ExtensionFactory {
 		pi.on("context", async (event, ctx: ExtensionContext) => {
 			const projected = [...event.messages];
 			const root = runtimeRoot(ctx);
+			let sentCounts: Map<string, number> | undefined;
 			// How many provider requests each message has already been part of,
 			// counted by the assistant messages that follow it.
 			const priorAssistantCounts = new Array<number>(event.messages.length);
@@ -157,13 +170,16 @@ export function createObservationPackExtension(): ExtensionFactory {
 					if (!observation) continue;
 					await ensureStored(observation);
 
-					const sendCountKey = `${root}\0${observation.id}`;
-					const previousSends = sentCounts.get(sendCountKey) ?? priorAssistantCounts[index] ?? 0;
+					sentCounts ??= await countsFor(root);
+					// Preserve the older session-history fallback when no ledger row
+					// exists (e.g. a fork), without shrinking a recovered allowance.
+					const previousSends = sentCounts.get(observation.id) ?? priorAssistantCounts[index] ?? 0;
 					if (previousSends < FULL_SENDS) {
 						await ledgerFor(ctx)({
 							event: "full",
 							id: observation.id,
 							request: requestIndex,
+							sendNumber: previousSends + 1,
 							tool: observation.toolName,
 							originalBytes: observation.bytes,
 							originalLines: observation.lines,
@@ -171,7 +187,7 @@ export function createObservationPackExtension(): ExtensionFactory {
 							isError: observation.isError,
 							contentHash: observation.contentHash,
 						});
-						sentCounts.set(sendCountKey, previousSends + 1);
+						sentCounts.set(observation.id, previousSends + 1);
 						continue;
 					}
 
@@ -200,7 +216,7 @@ export function createObservationPackExtension(): ExtensionFactory {
 						);
 					}
 					projected[index] = { ...message, content: [{ type: "text", text: placeholder }] };
-					sentCounts.set(sendCountKey, previousSends + 1);
+					sentCounts.set(observation.id, previousSends + 1);
 				} catch (error) {
 					// Fail open: a packing failure must never cost the agent its observation.
 					const reason = error instanceof Error ? error.message : String(error);
