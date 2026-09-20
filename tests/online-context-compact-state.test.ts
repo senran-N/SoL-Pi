@@ -3,6 +3,7 @@
  * SPDX-License-Identifier: MIT
  */
 import { describe, expect, it } from "vitest";
+import { decideCompaction, DEFAULT_COMPACTION_ECONOMICS } from "../src/sol-pi/extensions/online-context-compact/economics.ts";
 import {
 	appendOnlineState,
 	initialOnlineState,
@@ -102,6 +103,32 @@ describe("Online Context Compact state snapshots", () => {
 			cacheDebtTokens: 1_200,
 			cacheDebtRepaymentTokens: 300,
 		});
+	});
+
+	it("preserves unpaid cache-rebuild debt across a correction and resume", () => {
+		const before = recordCompaction(initialOnlineState(), { debtTokens: 2_000_000, repaymentTokens: 59_000 });
+		const corrected = recordCorrection(before);
+		const manager = new FakeSessionManager();
+		appendOnlineState(new FakePi(manager).asExtensionApi(), corrected);
+		const restored = restoreOnlineState(manager.entries);
+		expect(restored).toMatchObject({ cacheDebtTokens: 2_000_000, cacheDebtRepaymentTokens: 59_000, nativeCompactionCount: 1 });
+		const next = recordProviderRequest(restored, 80_000);
+		expect(next.cacheDebtTokens).toBe(1_941_000);
+		expect(decideCompaction({
+			writeTokens: 80_000,
+			archiveTokens: 60_000,
+			memoTokens: 1_000,
+			contextTokens: 80_000,
+			completedBoundaryRequestCounts: [4, 6, 5],
+			remainingBoundaries: 4,
+			averageContextTokenIncrement: 2_000,
+			contextWindowTokens: 200_000,
+			priorCompactionCount: next.nativeCompactionCount,
+			carriedDebtTokens: next.cacheDebtTokens,
+			cacheDebtRepaymentTokens: next.cacheDebtRepaymentTokens,
+			cacheWriteReadRatio: 2,
+			economics: DEFAULT_COMPACTION_ECONOMICS,
+		})).toMatchObject({ compact: false, reason: "deferred_carried_debt" });
 	});
 
 	it("drops stale plan history when the user corrects an active run", () => {

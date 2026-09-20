@@ -16,7 +16,12 @@ import {
 	registerOnlineContextCompact,
 	resolveKeepRecentTokens,
 } from "../src/sol-pi/extensions/online-context-compact/index.ts";
-import { restoreOnlineState } from "../src/sol-pi/extensions/online-context-compact/state.ts";
+import {
+	appendOnlineState,
+	initialOnlineState,
+	recordCompaction,
+	restoreOnlineState,
+} from "../src/sol-pi/extensions/online-context-compact/state.ts";
 import { FakePi, FakeSessionManager, fakeContext } from "./helpers.ts";
 
 const OPEN = [{ id: "build", goal: "build it", status: "in_progress" }] as const;
@@ -91,6 +96,25 @@ describe("Online Context Compact extension", () => {
 		expect(resolveKeepRecentTokens(undefined)).toBe(DEFAULT_KEEP_RECENT_TOKENS);
 		expect(() => resolveKeepRecentTokens(0)).toThrow(/positive safe integer/u);
 		expect(resolveKeepRecentTokens(50)).toBe(50);
+	});
+
+	it.each([
+		{ text: "CORRECTION: change the plan", streamingBehavior: undefined },
+		{ text: "change the plan", streamingBehavior: "steer" },
+	])("preserves cache debt when the input hook invalidates the forecast: %j", async (input) => {
+		const manager = new FakeSessionManager();
+		const pi = new FakePi(manager);
+		const charged = recordCompaction(initialOnlineState(), { debtTokens: 300, repaymentTokens: 100 });
+		appendOnlineState(pi.asExtensionApi(), { ...charged, plan: OPEN, completedBoundaryRequestCounts: [4, 6] });
+		registerOnlineContextCompact(pi.asExtensionApi());
+		const context = fakeContext(manager);
+		await pi.emit("session_start", { type: "session_start" }, context);
+		await pi.emit("input", { type: "input", source: "interactive", ...input }, context);
+		expect(restoreOnlineState(manager.entries)).toMatchObject({
+			plan: [], completedBoundaryRequestCounts: [], cacheDebtTokens: 300, cacheDebtRepaymentTokens: 100,
+		});
+		await pi.emit("before_provider_request", { type: "before_provider_request", payload: {} }, context);
+		expect(restoreOnlineState(manager.entries).cacheDebtTokens).toBe(200);
 	});
 
 	it("observes context without changing it", async () => {

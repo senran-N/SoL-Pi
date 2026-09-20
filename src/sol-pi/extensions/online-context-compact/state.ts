@@ -207,7 +207,7 @@ export function recordCorrection(state: OnlineState): OnlineState {
 		lastContextTokens: null,
 		positiveContextDeltaTotal: 0,
 		positiveContextDeltaCount: 0,
-		cacheDebtTokens: 0,
-		cacheDebtRepaymentTokens: 0,
+		// A correction invalidates the task forecast, not cache writes already
+		// charged by earlier compactions. Subsequent requests still repay them.
 	};
 }

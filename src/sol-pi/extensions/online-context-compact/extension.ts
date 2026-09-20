@@ -262,11 +262,21 @@ export function createOnlineContextCompactExtension(options: OnlineContextCompac
 				return [];
 			}
 		};
-		const contextTokens = (context: ExtensionContext): number => {
+		// Report and act on one budget snapshot. Pi may have no usage just after a
+		// reset, or its estimate may be smaller than the current projected context.
+		const contextBudget = (context: ExtensionContext) => {
+			const usage = context.getContextUsage();
 			const visible = observedMessages.reduce((total, message) => total + estimateTokens(message), 0);
 			const estimated = visible + tokenEstimate(context.getSystemPrompt());
-			const reported = context.getContextUsage()?.tokens;
-			return validPositiveInteger(reported) ? Math.max(reported, estimated) : estimated;
+			const reported = usage?.tokens;
+			const useReported = validPositiveInteger(reported) && reported >= estimated;
+			return {
+				tokens: useReported ? reported : estimated,
+				tokenSource: useReported ? "pi_usage" : "local_estimate",
+				window: validPositiveInteger(usage?.contextWindow)
+					? usage.contextWindow
+					: validPositiveInteger(context.model?.contextWindow) ? context.model.contextWindow : null,
+			};
 		};
 
 		registerOnlineTools(pi, {
@@ -358,18 +368,17 @@ export function createOnlineContextCompactExtension(options: OnlineContextCompac
 			contextRemaining: async (input) => {
 				ensureRestored(input.context);
 				if (input.signal?.aborted) throw new Error("Context usage read was aborted");
-				const usage = input.context.getContextUsage();
-				const window = validPositiveInteger(usage?.contextWindow) ? usage.contextWindow : null;
-				const tokens = validPositiveInteger(usage?.tokens) ? usage.tokens : contextTokens(input.context);
-				const percent = typeof usage?.percent === "number" ? usage.percent : null;
+				const { tokens, window, tokenSource } = contextBudget(input.context);
+				const percent = window === null ? null : tokens / window * 100;
 				const remaining = window === null ? null : Math.max(0, window - tokens);
 				const text =
 					remaining === null
 						? `Context: ${tokens} tokens used; the context window size is unknown.`
 						: `Context: ${tokens} of ${window} tokens used (${percent === null ? "?" : percent}%), ${remaining} tokens remaining. Use new_context to start a fresh window from the recorded plan, progress, and notes.`;
-				return result(text, {
+				return result(`${text} Token counts are estimates (${tokenSource}).`, {
 					op: "get_context_remaining",
 					tokens,
+					token_source: tokenSource,
 					context_window: window,
 					remaining_tokens: remaining,
 					percent,
@@ -438,7 +447,7 @@ export function createOnlineContextCompactExtension(options: OnlineContextCompac
 
 		pi.on("before_provider_request", (_event, context) => {
 			ensureRestored(context);
-			state = recordProviderRequest(state, contextTokens(context));
+			state = recordProviderRequest(state, contextBudget(context).tokens);
 			save();
 		});
 
@@ -471,15 +480,9 @@ export function createOnlineContextCompactExtension(options: OnlineContextCompac
 				return;
 			}
 
-			const usage = context.getContextUsage();
-			const writeTokens = contextTokens(context);
+			const { tokens: writeTokens, window: contextWindowTokens } = contextBudget(context);
 			const fixedTokens = tokenEstimate(context.getSystemPrompt());
 			const archiveTokens = Math.max(0, writeTokens - fixedTokens - keepRecentTokens);
-			const contextWindowTokens = validPositiveInteger(usage?.contextWindow)
-				? usage.contextWindow
-				: validPositiveInteger(context.model?.contextWindow)
-					? context.model.contextWindow
-					: null;
 			const averageContextTokenIncrement =
 				state.positiveContextDeltaCount === 0
 					? null
@@ -558,7 +561,7 @@ export function createOnlineContextCompactExtension(options: OnlineContextCompac
 
 			// No summary model call does not mean no cache rebuild. Carry unpaid
 			// debt even for explicit resets and window-protection overrides.
-			const writeTokens = pending?.decision.writeTokens ?? contextTokens(context);
+			const writeTokens = pending?.decision.writeTokens ?? contextBudget(context).tokens;
 			const memoTokens = pendingReset ? tokenEstimate(pendingReset.fragment) : DEFAULT_NATIVE_SUMMARY_TOKEN_ESTIMATE;
 			activeDebt = {
 				debtTokens: state.cacheDebtTokens + writeTokens * Math.max(0, (cacheWriteReadRatio ?? 1) - 1),
@@ -570,7 +573,7 @@ export function createOnlineContextCompactExtension(options: OnlineContextCompac
 			// all.
 			const archiveTokens = pending
 				? pending.decision.archiveTokens
-				: Math.max(0, contextTokens(context) - tokenEstimate(context.getSystemPrompt()) - keepRecentTokens);
+				: Math.max(0, writeTokens - tokenEstimate(context.getSystemPrompt()) - keepRecentTokens);
 			let compacted = false;
 			let compactionError: Error | undefined;
 			try {

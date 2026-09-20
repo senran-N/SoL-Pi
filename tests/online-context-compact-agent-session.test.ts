@@ -26,6 +26,12 @@ import {
 	createOnlineContextCompactExtension,
 	formatPostCompactionContinuation,
 } from "../src/sol-pi/extensions/online-context-compact/extension.ts";
+import {
+	initialOnlineState,
+	ONLINE_STATE_ENTRY,
+	restoreOnlineState,
+	type OnlineState,
+} from "../src/sol-pi/extensions/online-context-compact/state.ts";
 
 const OPEN = [{ id: "build", goal: "build it", status: "in_progress" }] as const;
 const DONE = [{ id: "build", goal: "build it", status: "completed" }] as const;
@@ -167,6 +173,65 @@ async function runCompactionScenario(requestedCompactions: 1 | 2): Promise<void>
 }
 
 describe("Online Context Compact with a real AgentSession", () => {
+	it("persists corrected cache debt before repaying it on the next real provider request", async () => {
+		const cwd = await mkdtemp(join(tmpdir(), "sol-pi-occ-debt-session-"));
+		const agentDir = join(cwd, "agent");
+		await mkdir(agentDir);
+		let session: AgentSession | undefined;
+		try {
+			const faux = fauxProvider({ provider: "sol-pi-occ-debt", api: "sol-pi-occ-debt-api" });
+			faux.setResponses([async (_context, options, _state, model) => {
+				// Faux does not construct an HTTP payload or call onPayload itself.
+				// Exercise the same public callback a network provider invokes, not
+				// a direct extension event, so AgentSession dispatch remains real.
+				await options?.onPayload?.({ model: model.id }, model);
+				return fauxAssistantMessage("corrected task acknowledged");
+			}]);
+			const sessionManager = SessionManager.inMemory(cwd);
+			sessionManager.appendCustomEntry(ONLINE_STATE_ENTRY, {
+				...initialOnlineState(), plan: OPEN, requestCount: 2, lastBoundaryRequestCount: 2,
+				completedBoundaryRequestCounts: [2], nativeCompactionCount: 1,
+				cacheDebtTokens: 300_000, cacheDebtRepaymentTokens: 59_000,
+			});
+			let afterCorrection: OnlineState | undefined;
+			const extension: ExtensionFactory = (pi) => {
+				pi.registerProvider(faux.provider);
+				createOnlineContextCompactExtension({ cacheWriteReadRatio: 12.5 })(pi);
+				pi.on("input", (_event, context) => {
+					afterCorrection = restoreOnlineState(context.sessionManager.getBranch());
+				});
+			};
+			const settingsManager = SettingsManager.inMemory({ compaction: { enabled: false }, retry: { enabled: false } });
+			const resourceLoader = new DefaultResourceLoader({
+				cwd, agentDir, settingsManager,
+				extensionFactories: [{ name: "online-context-compact-debt-test", factory: extension }],
+				noExtensions: true, noSkills: true, noPromptTemplates: true, noThemes: true, noContextFiles: true,
+				systemPrompt: "You are a deterministic lifecycle test assistant.",
+			});
+			await resourceLoader.reload();
+			expect(resourceLoader.getExtensions().errors).toEqual([]);
+			({ session } = await createAgentSession({
+				cwd, agentDir, model: faux.getModel(), thinkingLevel: "off", tools: ["update_plan"],
+				resourceLoader, sessionManager, settingsManager,
+			}));
+			await session.prompt("CORRECTION: use the revised approach", { expandPromptTemplates: false, source: "interactive" });
+			expect(afterCorrection).toMatchObject({
+				plan: [], completedBoundaryRequestCounts: [], requestCount: 2,
+				cacheDebtTokens: 300_000, cacheDebtRepaymentTokens: 59_000,
+			});
+			expect(restoreOnlineState(sessionManager.getBranch())).toMatchObject({
+				plan: [], nativeCompactionCount: 1, requestCount: 3,
+				cacheDebtTokens: 241_000, cacheDebtRepaymentTokens: 59_000,
+			});
+			expect(faux.state.callCount).toBe(1);
+			expect(session.getLastAssistantText()).toBe("corrected task acknowledged");
+			expect(session.isIdle).toBe(true);
+		} finally {
+			session?.dispose();
+			await rm(cwd, { recursive: true, force: true });
+		}
+	}, 10_000);
+
 	it("settles the automatic continuation before the original prompt returns", async () => {
 		await runCompactionScenario(1);
 	}, 10_000);

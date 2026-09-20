@@ -6,12 +6,13 @@ import { mkdtempSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { AgentMessage } from "@earendil-works/pi-agent-core";
-import type { CompactOptions, ContextUsage, ExtensionContext } from "@earendil-works/pi-coding-agent";
+import { estimateTokens, type CompactOptions, type ContextUsage, type ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { describe, expect, it, vi } from "vitest";
 import {
 	createOnlineContextCompactExtension,
 	windowLedgerPath,
 } from "../src/sol-pi/extensions/online-context-compact/index.ts";
+import { restoreOnlineState } from "../src/sol-pi/extensions/online-context-compact/state.ts";
 import { FakePi, FakeSessionManager, fakeContext } from "./helpers.ts";
 
 const OPEN = [{ id: "build", goal: "build it", status: "in_progress" }] as const;
@@ -83,6 +84,100 @@ describe("get_context_remaining", () => {
 			remaining_tokens: 5_000,
 			percent: 97.5,
 		});
+	});
+
+	it("selects the larger local estimate with one usage read", async () => {
+		const manager = new FakeSessionManager();
+		const pi = new FakePi(manager);
+		createOnlineContextCompactExtension()(pi.asExtensionApi());
+		const messages = buildSessionMessages();
+		const expectedTokens = messages.reduce((total, message) => total + estimateTokens(message), 0) + 100;
+		const getContextUsage = vi.fn(() => ({ tokens: 100, contextWindow: 2_000, percent: 5 }));
+		const context = fakeContext(manager, { getContextUsage, getSystemPrompt: () => "s".repeat(400) });
+		await pi.emitContext(messages, context);
+
+		const result = await (pi.tool("get_context_remaining").execute as Execute)("budget", {}, undefined, undefined, context);
+		expect(result.details).toMatchObject({
+			tokens: expectedTokens,
+			remaining_tokens: 2_000 - expectedTokens,
+			percent: expectedTokens / 2_000 * 100,
+			token_source: "local_estimate",
+		});
+		expect(getContextUsage).toHaveBeenCalledOnce();
+	});
+
+	it.each([
+		{ headroom: 16_385, protectsWindow: false },
+		{ headroom: 16_384, protectsWindow: true },
+	])("keeps reporting, accounting and the window gate consistent at $headroom tokens of headroom", async ({ headroom, protectsWindow }) => {
+		const manager = new FakeSessionManager();
+		const messages: AgentMessage[] = [
+			{ role: "user", content: "x".repeat(24_000), timestamp: Date.now() },
+			assistant("y".repeat(24_000)),
+		];
+		for (const message of messages) manager.appendMessage(message);
+		const pi = new FakePi(manager);
+		// No cache ratio: only window protection can open the gate here.
+		createOnlineContextCompactExtension({ keepRecentTokens: 1 })(pi.asExtensionApi());
+		const expectedTokens = messages.reduce((total, message) => total + estimateTokens(message), 0) + 100;
+		const window = expectedTokens + headroom;
+		const getContextUsage = vi.fn(() => ({ tokens: 100, contextWindow: window, percent: 0 }));
+		const abort = vi.fn();
+		const context = fakeContext(manager, { getContextUsage, abort, getSystemPrompt: () => "s".repeat(400) });
+		await pi.emitContext(messages, context);
+
+		const budget = await (pi.tool("get_context_remaining").execute as Execute)("budget", {}, undefined, undefined, context);
+		expect(budget.details).toMatchObject({ tokens: expectedTokens, remaining_tokens: headroom, token_source: "local_estimate" });
+		expect(getContextUsage).toHaveBeenCalledTimes(1);
+		await pi.emit("before_provider_request", { type: "before_provider_request", payload: {} }, context);
+		expect(restoreOnlineState(manager.entries).lastContextTokens).toBe(expectedTokens);
+		expect(getContextUsage).toHaveBeenCalledTimes(2);
+
+		const plan = pi.tool("update_plan").execute as Execute;
+		await plan("open", { steps: OPEN }, undefined, undefined, context);
+		await plan("done", { steps: DONE, progress: PROGRESS }, undefined, undefined, context);
+		await pi.emit("turn_end", {
+			type: "turn_end", turnIndex: 1, message: assistant("boundary"),
+			toolResults: [{ role: "toolResult", toolCallId: "done", toolName: "update_plan", content: [], isError: false, timestamp: Date.now() }],
+		}, context);
+		expect(getContextUsage).toHaveBeenCalledTimes(3);
+		expect(abort).toHaveBeenCalledTimes(protectsWindow ? 1 : 0);
+	});
+
+	it.each([undefined, { tokens: null, contextWindow: 0, percent: null }])(
+		"falls back to the model window when Pi has no usable window: %j",
+		async (usage) => {
+			const pi = new FakePi();
+			createOnlineContextCompactExtension()(pi.asExtensionApi());
+			const context = fakeContext(pi.sessionManager, {
+				getContextUsage: () => usage,
+				getSystemPrompt: () => "s".repeat(400),
+				model: { contextWindow: 8_000 } as ExtensionContext["model"],
+			});
+			const result = await (pi.tool("get_context_remaining").execute as Execute)("budget", {}, undefined, undefined, context);
+			expect(result.details).toMatchObject({ tokens: 100, context_window: 8_000, remaining_tokens: 7_900, percent: 1.25 });
+		},
+	);
+
+	it("recomputes the percentage when usage is unknown just after compaction", async () => {
+		const pi = new FakePi();
+		createOnlineContextCompactExtension()(pi.asExtensionApi());
+		const context = fakeContext(pi.sessionManager, {
+			getContextUsage: () => ({ tokens: null, contextWindow: 2_000, percent: null }),
+			getSystemPrompt: () => "s".repeat(400),
+		});
+		const result = await (pi.tool("get_context_remaining").execute as Execute)("budget", {}, undefined, undefined, context);
+		expect(result.details).toMatchObject({ tokens: 100, remaining_tokens: 1_900, percent: 5, token_source: "local_estimate" });
+	});
+
+	it("does not report negative remaining tokens for an overfull window", async () => {
+		const pi = new FakePi();
+		createOnlineContextCompactExtension()(pi.asExtensionApi());
+		const context = fakeContext(pi.sessionManager, {
+			getContextUsage: () => ({ tokens: 2_500, contextWindow: 2_000, percent: Number.NaN }),
+		});
+		const result = await (pi.tool("get_context_remaining").execute as Execute)("budget", {}, undefined, undefined, context);
+		expect(result.details).toMatchObject({ tokens: 2_500, remaining_tokens: 0, percent: 125, token_source: "pi_usage" });
 	});
 
 	it("still answers when Pi does not report a context window", async () => {
