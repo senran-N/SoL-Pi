@@ -77,8 +77,6 @@ describe("recoverable window checkpoints", () => {
 					})().catch((error: unknown) => options.onError?.(error instanceof Error ? error : new Error(String(error))));
 				},
 			});
-			// Settle the synthetic continuation immediately, without another request.
-			pi.sendMessage = () => { void pi.emit("agent_settled", { type: "agent_settled" }, context); };
 			const execute = pi.tool("new_context").execute;
 			for (let i = 1; i <= 2; i++) {
 				await execute(`reset-${i}`, {}, undefined, undefined, context);

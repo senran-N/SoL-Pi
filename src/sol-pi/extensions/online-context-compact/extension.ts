@@ -62,7 +62,6 @@ export type OnlineContextCompactOptions = {
 type PendingBoundary = { readonly toolCallId: string };
 type SelectedCompaction = { readonly decision: CompactionDecision };
 type CacheDebt = { readonly debtTokens: number; readonly repaymentTokens: number };
-type PendingContinuation = { readonly promise: Promise<void>; readonly resolve: () => void };
 type PendingReset = { readonly windowNumber: number; readonly fragment: string; readonly checkpoint: WindowResetInput };
 
 export function resolveKeepRecentTokens(value: number | undefined): number {
@@ -212,7 +211,6 @@ export function createOnlineContextCompactExtension(options: OnlineContextCompac
 		let pendingBoundary: PendingBoundary | undefined;
 		let selected: SelectedCompaction | undefined;
 		let activeDebt: CacheDebt | undefined;
-		let nextContinuation: PendingContinuation | undefined;
 		let pendingReset: PendingReset | undefined;
 		// A model-requested window reset. Unlike the economic boundary it does not
 		// depend on a priced decision, but it is still applied at the next idle
@@ -220,17 +218,7 @@ export function createOnlineContextCompactExtension(options: OnlineContextCompac
 		let resetRequested = false;
 		let compactionInFlight = false;
 
-		const releaseContinuation = (): void => {
-			const continuation = nextContinuation;
-			nextContinuation = undefined;
-			continuation?.resolve();
-		};
-		const releaseParentContinuation = (continuation: PendingContinuation | undefined): void => {
-			if (continuation) setTimeout(continuation.resolve, 0);
-		};
-
 		const restore = (context: ExtensionContext): void => {
-			releaseContinuation();
 			state = restoreOnlineState(context.sessionManager.getBranch());
 			restored = true;
 			observedMessages = buildSessionContext(
@@ -513,28 +501,15 @@ export function createOnlineContextCompactExtension(options: OnlineContextCompac
 		});
 
 		pi.on("agent_settled", async (_event, context) => {
-			// sendMessage() starts a turn without returning its promise. Capture the
-			// child settlement so print/JSON mode cannot dispose while it is running.
-			const parentContinuation = nextContinuation;
-			nextContinuation = undefined;
 			const pending = selected;
 			selected = undefined;
-			if (!context.isIdle()) {
-				selected = pending;
-				nextContinuation = parentContinuation;
-				return;
-			}
 			const requestedReset = resetRequested;
-			if (!pending && !requestedReset) {
-				releaseParentContinuation(parentContinuation);
-				return;
-			}
+			if (!pending && !requestedReset) return;
 			if (requestedReset) resetRequested = false;
 			// The priced path already cleared this check at turn_end; a reset that
 			// arrives on its own has not, and Pi throws rather than no-ops when there
 			// is nothing to archive.
 			if (!pending && !nativeCompactionFeasible(context.sessionManager.getBranch(), keepRecentTokens)) {
-				releaseParentContinuation(parentContinuation);
 				return;
 			}
 
@@ -618,40 +593,23 @@ export function createOnlineContextCompactExtension(options: OnlineContextCompac
 				}
 
 				if (compacted) {
-					let resolveContinuation!: () => void;
-					const continuation: PendingContinuation = {
-						promise: new Promise<void>((resolve) => {
-							resolveContinuation = resolve;
-						}),
-						resolve: () => resolveContinuation(),
-					};
-					nextContinuation = continuation;
-					try {
-						pi.sendMessage(
-							{
-								customType: "sol-pi-online-context-compact",
-								content: formatPostCompactionContinuation(continuationFiles),
-								display: false,
-							},
-							{ triggerTurn: true },
-						);
-					} catch (error) {
-						if (nextContinuation === continuation) nextContinuation = undefined;
-						continuation.resolve();
-						throw error;
-					}
-					if (context.isIdle() && nextContinuation === continuation) {
-						nextContinuation = undefined;
-						continuation.resolve();
-						throw new Error("Online context compact continuation did not start");
-					}
-					await continuation.promise;
+					// Pi 0.87.0: sendMessage({triggerTurn:true}) from agent_settled
+					// pushes a deferred action that Pi awaits in _emitAgentSettled.
+					// No settlement barrier is needed — Pi keeps the process alive
+					// until the deferred continuation run completes.
+					pi.sendMessage(
+						{
+							customType: "sol-pi-online-context-compact",
+							content: formatPostCompactionContinuation(continuationFiles),
+							display: false,
+						},
+						{ triggerTurn: true },
+					);
 				}
 			} finally {
 				compactionInFlight = false;
 				activeDebt = undefined;
 				pendingReset = undefined;
-				releaseParentContinuation(parentContinuation);
 			}
 		});
 
@@ -717,7 +675,6 @@ export function createOnlineContextCompactExtension(options: OnlineContextCompac
 		});
 
 		pi.on("session_shutdown", () => {
-			releaseContinuation();
 			pendingBoundary = undefined;
 			selected = undefined;
 			activeDebt = undefined;

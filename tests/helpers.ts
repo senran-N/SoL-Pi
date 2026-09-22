@@ -246,7 +246,7 @@ export function fakeContext(
 		model: undefined,
 		scopedModels: [],
 		ui: {},
-		isIdle: () => false,
+		isIdle: () => true,
 		isProjectTrusted: () => true,
 		signal: undefined,
 		abort: () => undefined,

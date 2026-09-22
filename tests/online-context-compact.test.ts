@@ -132,12 +132,6 @@ describe("Online Context Compact extension", () => {
 		manager.appendMessage(assistant(`work ${"y".repeat(2_000)}`));
 		const pi = new FakePi(manager);
 		createOnlineContextCompactExtension({ cacheWriteReadRatio: 12.5, keepRecentTokens: 1 })(pi.asExtensionApi());
-		let idle = true;
-		const sendMessage = pi.sendMessage.bind(pi);
-		vi.spyOn(pi, "sendMessage").mockImplementation((message, options) => {
-			idle = false;
-			sendMessage(message, options);
-		});
 		const abort = vi.fn();
 		const compactCalls: CompactOptions[] = [];
 		let finishCompaction!: () => void;
@@ -176,7 +170,7 @@ describe("Online Context Compact extension", () => {
 		context = fakeContext(manager, {
 			abort,
 			compact,
-			isIdle: () => idle,
+			isIdle: () => true,
 			getSystemPrompt: () => "test prompt",
 			getContextUsage: () => ({ tokens: 195_000, contextWindow: 200_000, percent: 97.5 }),
 		});
@@ -211,23 +205,16 @@ describe("Online Context Compact extension", () => {
 		expect(abort).toHaveBeenCalledOnce();
 		expect(compactCalls).toEqual([]);
 
-		idle = false;
-		await pi.emit("agent_settled", { type: "agent_settled" }, context);
-		expect(compactCalls).toEqual([]);
-
-		idle = true;
-		let firstSettlementFinished = false;
-		const firstSettlement = pi.emit("agent_settled", { type: "agent_settled" }, context).then(() => {
-			firstSettlementFinished = true;
-		});
+		const settlement = pi.emit("agent_settled", { type: "agent_settled" }, context);
 		await vi.waitFor(() => expect(compactCalls).toHaveLength(1));
 		expect(await pi.emit("session_before_tree", { type: "session_before_tree" }, context)).toEqual({ cancel: true });
 		finishCompaction();
-		await vi.waitFor(() => expect(pi.sentMessages).toHaveLength(1));
+		await settlement;
 
 		expect(compactCalls).toHaveLength(1);
 		expect(compactCalls[0]?.customInstructions).toBe(BOUNDARY_COMPACTION_INSTRUCTIONS);
-		expect(firstSettlementFinished).toBe(false);
+		// sendMessage queues a deferred continuation in 0.87.0; the handler
+		// returns immediately without awaiting the continuation settlement.
 		expect(pi.sentMessages).toEqual([
 			{
 				message: {
@@ -240,10 +227,6 @@ describe("Online Context Compact extension", () => {
 			},
 		]);
 
-		idle = true;
-		await pi.emit("agent_settled", { type: "agent_settled" }, context);
-		await firstSettlement;
-		expect(firstSettlementFinished).toBe(true);
 		expect(await pi.emit("session_before_tree", { type: "session_before_tree" }, context)).toBeUndefined();
 		expect(restoreOnlineState(manager.entries)).toMatchObject({ nativeCompactionCount: 1, pendingProgress: [] });
 	});

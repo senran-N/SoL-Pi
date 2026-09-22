@@ -168,7 +168,6 @@ describe("notes inside the window fragment", () => {
 		createOnlineContextCompactExtension({ cacheWriteReadRatio: 12.5, keepRecentTokens: 1 })(pi.asExtensionApi());
 		await writeNote(sessionRoot(root), "design-notes", "durable body");
 
-		let idle = true;
 		const abort = vi.fn();
 		let beforeCompact: unknown;
 		let context: ExtensionContext;
@@ -213,14 +212,9 @@ describe("notes inside the window fragment", () => {
 		context = fakeContext(manager, {
 			abort,
 			compact,
-			isIdle: () => idle,
+			isIdle: () => true,
 			getSystemPrompt: () => "test prompt",
 			getContextUsage: () => ({ tokens: 195_000, contextWindow: 200_000, percent: 97.5 }),
-		});
-		const sendMessage = pi.sendMessage.bind(pi);
-		vi.spyOn(pi, "sendMessage").mockImplementation((message, options) => {
-			idle = false;
-			sendMessage(message, options);
 		});
 
 		type Execute = (
@@ -264,7 +258,6 @@ describe("notes inside the window fragment", () => {
 		expect(result.compaction?.summary).toMatch(/- design-notes \(\d+ bytes\)/u);
 		expect(result.compaction?.summary).not.toContain("durable body");
 
-		idle = true;
 		await pi.emit("agent_settled", { type: "agent_settled" }, context);
 		await settled;
 	});

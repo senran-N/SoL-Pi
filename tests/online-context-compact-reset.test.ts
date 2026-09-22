@@ -203,7 +203,6 @@ describe("new_context", () => {
 		const pi = new FakePi(manager);
 		createOnlineContextCompactExtension({ cacheWriteReadRatio: 12.5, keepRecentTokens: 1 })(pi.asExtensionApi());
 
-		let idle = true;
 		const abort = vi.fn();
 		let beforeCompact: unknown;
 		let compactCalls = 0;
@@ -250,14 +249,9 @@ describe("new_context", () => {
 		context = fakeContext(manager, {
 			abort,
 			compact,
-			isIdle: () => idle,
+			isIdle: () => true,
 			getSystemPrompt: () => "test prompt",
 			getContextUsage: () => ({ tokens: 195_000, contextWindow: 200_000, percent: 97.5 }),
-		});
-		const sendMessage = pi.sendMessage.bind(pi);
-		vi.spyOn(pi, "sendMessage").mockImplementation((message, options) => {
-			idle = false;
-			sendMessage(message, options);
 		});
 
 		const runPlan = pi.tool("update_plan").execute as Execute;
@@ -273,8 +267,7 @@ describe("new_context", () => {
 
 		// No turn_end, so the economic gate has no decision: only the explicit
 		// request can drive a compaction here.
-		const settled = pi.emit("agent_settled", { type: "agent_settled" }, context);
-		await vi.waitFor(() => expect(beforeCompact).toBeDefined());
+		await pi.emit("agent_settled", { type: "agent_settled" }, context);
 		expect(compactCalls).toBe(1);
 
 		const result = beforeCompact as { compaction?: { summary: string; details?: unknown } };
@@ -291,10 +284,6 @@ describe("new_context", () => {
 		expect(ledger).toHaveLength(1);
 		expect(ledger[0]).toMatchObject({ event: "reset", reason: "manual", windowNumber: 1, windowId: "w1" });
 		expect(ledger[0]?.fragmentBytes).toBeGreaterThan(0);
-
-		idle = true;
-		await pi.emit("agent_settled", { type: "agent_settled" }, context);
-		await settled;
 	});
 
 	it("declines instead of scheduling a compaction Pi cannot perform", async () => {
@@ -337,7 +326,6 @@ describe("new_context", () => {
 		const pi = new FakePi(manager);
 		createOnlineContextCompactExtension({ cacheWriteReadRatio: 12.5, keepRecentTokens: 1 })(pi.asExtensionApi());
 
-		let idle = true;
 		let compactions = 0;
 		const fragments: string[] = [];
 		let context: ExtensionContext;
@@ -381,14 +369,9 @@ describe("new_context", () => {
 		context = fakeContext(manager, {
 			abort: vi.fn(),
 			compact,
-			isIdle: () => idle,
+			isIdle: () => true,
 			getSystemPrompt: () => "test prompt",
 			getContextUsage: () => ({ tokens: 195_000, contextWindow: 200_000, percent: 97.5 }),
-		});
-		const sendMessage = pi.sendMessage.bind(pi);
-		vi.spyOn(pi, "sendMessage").mockImplementation((message, options) => {
-			idle = false;
-			sendMessage(message, options);
 		});
 
 		const runPlan = pi.tool("update_plan").execute as Execute;
@@ -397,11 +380,8 @@ describe("new_context", () => {
 			await runPlan(`plan-open-${round}`, { steps: OPEN }, undefined, undefined, context);
 			await runPlan(`plan-done-${round}`, { steps: DONE, progress: PROGRESS }, undefined, undefined, context);
 			await newContext(`reset-${round}`, {}, undefined, undefined, context);
-			const settled = pi.emit("agent_settled", { type: "agent_settled" }, context);
-			await vi.waitFor(() => expect(fragments).toHaveLength(round));
-			idle = true;
 			await pi.emit("agent_settled", { type: "agent_settled" }, context);
-			await settled;
+			await vi.waitFor(() => expect(fragments).toHaveLength(round));
 		};
 
 		await pi.emit("session_start", { type: "session_start" }, context);

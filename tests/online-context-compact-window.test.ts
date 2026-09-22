@@ -183,7 +183,6 @@ describe("windowed compaction wiring", () => {
 		const pi = new FakePi(manager);
 		createOnlineContextCompactExtension({ cacheWriteReadRatio: 12.5, keepRecentTokens: 1 })(pi.asExtensionApi());
 
-		let idle = true;
 		const abort = vi.fn();
 		let beforeCompact: unknown;
 		let compactOptions: CompactOptions | undefined;
@@ -230,14 +229,9 @@ describe("windowed compaction wiring", () => {
 		context = fakeContext(manager, {
 			abort,
 			compact,
-			isIdle: () => idle,
+			isIdle: () => true,
 			getSystemPrompt: () => "test prompt",
 			getContextUsage: () => ({ tokens: 195_000, contextWindow: 200_000, percent: 97.5 }),
-		});
-		const sendMessage = pi.sendMessage.bind(pi);
-		vi.spyOn(pi, "sendMessage").mockImplementation((message, options) => {
-			idle = false;
-			sendMessage(message, options);
 		});
 
 		await pi.emit("session_start", { type: "session_start" }, context);
@@ -297,7 +291,6 @@ describe("windowed compaction wiring", () => {
 			),
 		).toBeUndefined();
 
-		idle = true;
 		await pi.emit("agent_settled", { type: "agent_settled" }, context);
 		await settled;
 
