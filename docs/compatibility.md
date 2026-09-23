@@ -1,6 +1,6 @@
 # Pi Compatibility
 
-SoL-Pi is developed and tested against `@earendil-works/pi-coding-agent` 0.87.0. The full test suite, type checking, package inspection, and public API check pass, and nothing in the suite is skipped: a guard that would otherwise need a privileged filesystem operation uses an equivalent one the platform does allow, so it is exercised rather than stepped over. The current suite is 33 files and 292 tests.
+SoL-Pi is developed and tested against `@earendil-works/pi-coding-agent` 0.87.1. The full test suite, type checking, package inspection, and public API check pass, and nothing in the suite is skipped: a guard that would otherwise need a privileged filesystem operation uses an equivalent one the platform does allow, so it is exercised rather than stepped over. The current suite is 33 files and 292 tests.
 
 Compatibility with the earlier 0.84.2 release rests on a check made before the mechanisms were extended and has not been re-verified since, so treat it as historical rather than a current guarantee. Earlier checks likewise covered the public API surface of Pi 0.81.1, the base used by the original Pi fork. The runtime range is deliberately expressed as a peer dependency because Pi owns installation and upgrade of its packages; it is not a guarantee for every Pi version.
 
