@@ -172,6 +172,7 @@ export function createScopedExplorationExtension(options: ScopedExplorationOptio
 }
 
 export {
+	DEFAULT_EXCLUDED_PATHS,
 	DEFAULT_EXPLORER_MODEL,
 	DEFAULT_EXPLORER_PROVIDER,
 	DEFAULT_MAX_STEPS,

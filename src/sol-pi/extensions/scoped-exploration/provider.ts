@@ -11,43 +11,19 @@
  * own tests, and an exploration should not be able to change its behaviour by
  * sharing a helper with it.
  */
-import type { Api, AssistantMessage, Context, Model, ProviderStreamOptions } from "@earendil-works/pi-ai";
+import type { AssistantMessage, Context } from "@earendil-works/pi-ai";
 import { complete as completeCompat } from "@earendil-works/pi-ai/compat";
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
+import { completeNestedModel } from "../../pi-compat.ts";
 import { trackModelCall } from "../../usage/ledger.ts";
 import type { ExplorationConfig } from "./config.ts";
 
 export type CompatComplete = typeof completeCompat;
 
-type ResolvedCompatAuth =
-	| {
-			readonly ok: true;
-			readonly apiKey?: string;
-			readonly baseUrl?: string;
-			readonly env?: Record<string, string>;
-			readonly headers?: Record<string, string | null>;
-	  }
-	| { readonly ok: false; readonly error: string };
-
-type CompatibleModelRegistry = {
-	readonly find?: (provider: string, modelId: string) => Model<Api> | undefined;
-	readonly complete?: (
-		model: Model<Api>,
-		context: Context,
-		options?: ProviderStreamOptions,
-	) => Promise<AssistantMessage>;
-	readonly getApiKeyAndHeaders: (model: Model<Api>) => Promise<ResolvedCompatAuth>;
-};
-
 export type ExplorerTurn = { readonly role: "user" | "assistant"; readonly text: string };
 
 export class ExplorerModelUnavailableError extends Error {
 	override readonly name = "ExplorerModelUnavailableError";
-}
-
-function stringHeaders(headers: Record<string, string | null> | undefined): Record<string, string> | undefined {
-	if (headers === undefined) return undefined;
-	return Object.fromEntries(Object.entries(headers).filter((entry): entry is [string, string] => entry[1] !== null));
 }
 
 function responseText(response: AssistantMessage): string {
@@ -63,14 +39,10 @@ export type ExplorerCall = (
 ) => Promise<string>;
 
 export const callExplorer: ExplorerCall = async (config, systemPrompt, turns, context, signal) => {
-	const registry = context.modelRegistry as unknown as CompatibleModelRegistry;
 	const response = await trackModelCall(context, "explorer", { provider: config.explorerProvider, model: config.explorerModel }, async (dispatched) => {
+		const registry = context.modelRegistry as unknown as { find?: (provider: string, modelId: string) => { maxTokens: number } | undefined };
 		const model = registry.find?.(config.explorerProvider, config.explorerModel);
-		if (!model) {
-			throw new ExplorerModelUnavailableError(
-				`Explorer model is unavailable: ${config.explorerProvider}/${config.explorerModel}`,
-			);
-		}
+		if (!model) throw new ExplorerModelUnavailableError(`Explorer model is unavailable: ${config.explorerProvider}/${config.explorerModel}`);
 
 		const requestContext: Context = {
 			systemPrompt,
@@ -87,22 +59,13 @@ export const callExplorer: ExplorerCall = async (config, systemPrompt, turns, co
 			timeoutMs: config.timeoutMs,
 		};
 
-		if (typeof registry.complete === "function") {
-			signal.throwIfAborted();
-			dispatched();
-			return registry.complete(model, requestContext, requestOptions);
-		}
-		const auth = await registry.getApiKeyAndHeaders(model);
-		if (!auth.ok) throw new Error(auth.error);
-		const legacyModel = auth.baseUrl ? { ...model, baseUrl: auth.baseUrl } : model;
-		const headers = stringHeaders(auth.headers);
-		signal.throwIfAborted();
 		dispatched();
-		return completeCompat(legacyModel, requestContext, {
-			...requestOptions,
-			...(auth.apiKey === undefined ? {} : { apiKey: auth.apiKey }),
-			...(headers === undefined ? {} : { headers }),
-			...(auth.env === undefined ? {} : { env: auth.env }),
+		return completeNestedModel(context, {
+			provider: config.explorerProvider,
+			modelId: config.explorerModel,
+			context: requestContext,
+			options: requestOptions,
+			compatComplete: completeCompat,
 		});
 	}, signal);
 	if (response.stopReason !== "stop" && response.stopReason !== "length") {

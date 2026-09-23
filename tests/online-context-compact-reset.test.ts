@@ -6,7 +6,7 @@ import { mkdtempSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { AgentMessage } from "@earendil-works/pi-agent-core";
-import { estimateTokens, type CompactOptions, type ContextUsage, type ExtensionContext } from "@earendil-works/pi-coding-agent";
+import { estimateTokens, type CompactOptions, type ContextUsage, type ExtensionContext, type SessionEntry } from "@earendil-works/pi-coding-agent";
 import { describe, expect, it, vi } from "vitest";
 import {
 	createOnlineContextCompactExtension,
@@ -107,9 +107,9 @@ describe("get_context_remaining", () => {
 	});
 
 	it.each([
-		{ headroom: 16_385, protectsWindow: false },
-		{ headroom: 16_384, protectsWindow: true },
-	])("keeps reporting, accounting and the window gate consistent at $headroom tokens of headroom", async ({ headroom, protectsWindow }) => {
+		{ reserveOffset: 0, protectsWindow: true },
+		{ reserveOffset: 1, protectsWindow: false },
+	])("keeps reporting, accounting and the 25% window gate consistent (protects: $protectsWindow)", async ({ reserveOffset, protectsWindow }) => {
 		const manager = new FakeSessionManager();
 		const messages: AgentMessage[] = [
 			{ role: "user", content: "x".repeat(24_000), timestamp: Date.now() },
@@ -120,6 +120,7 @@ describe("get_context_remaining", () => {
 		// No cache ratio: only window protection can open the gate here.
 		createOnlineContextCompactExtension({ keepRecentTokens: 1 })(pi.asExtensionApi());
 		const expectedTokens = messages.reduce((total, message) => total + estimateTokens(message), 0) + 100;
+		const headroom = Math.floor(expectedTokens / 3) + reserveOffset;
 		const window = expectedTokens + headroom;
 		const getContextUsage = vi.fn(() => ({ tokens: 100, contextWindow: window, percent: 0 }));
 		const abort = vi.fn();
@@ -306,6 +307,83 @@ describe("new_context", () => {
 		expect(ledger).toHaveLength(1);
 		expect(ledger[0]).toMatchObject({ event: "reset", reason: "manual", windowNumber: 1, windowId: "w1" });
 		expect(ledger[0]?.fragmentBytes).toBeGreaterThan(0);
+	});
+
+	it("uses Pi's projected context edits when checking compaction feasibility", async () => {
+		const root = mkdtempSync(join(tmpdir(), "sol-pi-occ-projected-compaction-"));
+		const manager = new FakeSessionManager([], "session-a", root);
+		const oldUserId = manager.appendMessage({ role: "user", content: `old ${"x".repeat(2_000)}`, timestamp: Date.now() });
+		const oldAssistantId = manager.appendMessage(assistant(`work ${"y".repeat(2_000)}`));
+		const editedUserId = "context-edit-user";
+		manager.entries.push(
+			{
+				type: "context_edit",
+				id: editedUserId,
+				parentId: oldAssistantId,
+				timestamp: new Date().toISOString(),
+				targetId: oldUserId,
+				replacement: { content: [{ type: "text", text: "tiny" }] },
+			},
+			{
+				type: "context_edit",
+				id: "context-edit-assistant",
+				parentId: editedUserId,
+				timestamp: new Date().toISOString(),
+				targetId: oldAssistantId,
+				replacement: { content: [{ type: "text", text: "tiny" }] },
+			},
+		);
+		manager.leafId = "context-edit-assistant";
+		const pi = new FakePi(manager);
+		createOnlineContextCompactExtension({ cacheWriteReadRatio: 12.5, keepRecentTokens: 100 })(pi.asExtensionApi());
+
+		const abort = vi.fn();
+		const context = fakeContext(manager, {
+			abort,
+			compact: vi.fn(),
+			getContextUsage: () => ({ tokens: 195_000, contextWindow: 200_000, percent: 97.5 }),
+			getSystemPrompt: () => "test prompt",
+		});
+		await pi.emit("session_start", { type: "session_start" }, context);
+		await pi.emitContext(buildSessionMessages(), context);
+		await pi.emit("before_provider_request", { type: "before_provider_request", payload: {} }, context);
+		const runPlan = pi.tool("update_plan").execute as Execute;
+		await runPlan("plan-open", { steps: OPEN }, undefined, undefined, context);
+		await runPlan("plan-done", { steps: DONE, progress: PROGRESS }, undefined, undefined, context);
+
+		const boundary = await pi.emit("turn_end", {
+			type: "turn_end",
+			turnIndex: 1,
+			message: assistant("boundary"),
+			toolResults: [{ role: "toolResult", toolCallId: "plan-done", toolName: "update_plan", content: [], isError: false, timestamp: Date.now() }],
+		}, context);
+
+		// Raw history is large enough to cut, but its projected replacements are
+		// both within keepRecentTokens, so Pi's prepareCompaction returns undefined.
+		expect(boundary).toBeUndefined();
+		expect(abort).not.toHaveBeenCalled();
+		expect(context.compact).not.toHaveBeenCalled();
+	});
+
+	it("treats Pi's too-small-session error as a graceful no-op if feasibility changes", async () => {
+		const root = mkdtempSync(join(tmpdir(), "sol-pi-occ-newcontext-race-"));
+		const manager = new FakeSessionManager([], "session-a", root);
+		manager.appendMessage({ role: "user", content: `old ${"x".repeat(2_000)}`, timestamp: Date.now() });
+		manager.appendMessage(assistant(`work ${"y".repeat(2_000)}`));
+		const pi = new FakePi(manager);
+		createOnlineContextCompactExtension({ cacheWriteReadRatio: 12.5, keepRecentTokens: 1 })(pi.asExtensionApi());
+		const compact = vi.fn((options: CompactOptions = {}) => {
+			options.onError?.(new Error("Nothing to compact (session too small)"));
+		});
+		const context = fakeContext(manager, { compact, isIdle: () => true, getSystemPrompt: () => "test prompt" });
+		await pi.emit("session_start", { type: "session_start" }, context);
+
+		const newContext = pi.tool("new_context").execute as Execute;
+		const requested = await newContext("call-1", {}, undefined, undefined, context);
+		expect(requested.details).toMatchObject({ op: "new_context", requested: true });
+		await expect(pi.emit("agent_settled", { type: "agent_settled" }, context)).resolves.toBeUndefined();
+		expect(compact).toHaveBeenCalledOnce();
+		expect(pi.sentMessages).toEqual([]);
 	});
 
 	it("declines instead of scheduling a compaction Pi cannot perform", async () => {

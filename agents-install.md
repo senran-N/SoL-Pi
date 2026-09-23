@@ -95,6 +95,7 @@ SoL-Pi defaults every mechanism to disabled. For this managed installation, crea
   "scopedExplorationProvider": "provider-id",
   "scopedExplorationModel": "model-id",
   "scopedExplorationMaxSteps": 8,
+  "scopedExplorationExcludedPaths": [".env", ".env.*", "**/*credential*", "**/*secret*", "**/*.pem", "**/*.key"],
   "cacheWriteReadRatio": 12.5
 }
 ```
@@ -103,7 +104,7 @@ SoL-Pi defaults every mechanism to disabled. For this managed installation, crea
 
 `commandYield` replaces the execution backend of whichever shell tool Pi has active and registers `exec_wait`, `exec_list`, and `exec_kill`. `commandYieldTimeMs` is how long a command may hold the foreground before it returns its output so far plus a live handle; it defaults to `10000` and must be an integer between `1000` and `300000`. Yielding does not stop the command and does not discard output, so the deadline is short on purpose. It is unrelated to the `timeout` a shell tool call may carry: that one still terminates the command, and SoL-Pi passes it to Pi unchanged.
 
-`scopedExploration` registers the `explore` tool, which answers one question about the project inside a separate, discarded context and returns a short answer whose every citation is re-checked against the file before delivery. `scopedExplorationProvider` and `scopedExplorationModel` select that nested route; they default to the built-in explorer route, which is the same route Evidence-Preserving Reducer defaults to, and must be non-empty strings when supplied. `scopedExplorationMaxSteps` is how many read-only actions one exploration may take before it must answer; it defaults to `8` and must be an integer between `1` and `32`.
+`scopedExploration` registers the `explore` tool, which answers one question about the project inside a separate, discarded context and returns a short answer whose every citation is re-checked against the file before delivery. `scopedExplorationProvider` and `scopedExplorationModel` select that nested route; they default to the built-in explorer route, which is the same route Evidence-Preserving Reducer defaults to, and must be non-empty strings when supplied. `scopedExplorationMaxSteps` is how many read-only actions one exploration may take before it must answer; it defaults to `8` and must be an integer between `1` and `32`. `scopedExplorationExcludedPaths` controls glob patterns excluded from search, reads, listings, and citation verification; it defaults to common `.env`, credential, secret, private-key, and certificate patterns and must be an array of non-empty strings when supplied.
 
 An exploration reads project files and sends what it selects to the configured explorer model. It is read-only and confined to the project root, but it is not a secrets filter. Do not enable it for a checkout whose contents must stay local.
 

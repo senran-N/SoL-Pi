@@ -90,7 +90,7 @@ export function parseAction(text: string): ExplorerAction | undefined {
 	}
 }
 
-export function explorerInstructions(maxSteps: number): string {
+export function explorerInstructions(maxSteps: number, excludedPaths: readonly string[] = []): string {
 	return [
 		"You are a scoped explorer working inside one project checkout. You answer one question by reading the project, and nothing else.",
 		"",
@@ -102,6 +102,7 @@ export function explorerInstructions(maxSteps: number): string {
 		"",
 		"Rules:",
 		`- You have at most ${maxSteps} steps. Spend them; do not guess early.`,
+		`- Excluded path patterns: ${excludedPaths.length > 0 ? excludedPaths.join(", ") : "none"}. Do not try to bypass an exclusion.`,
 		"- grep matches a literal, case-insensitive substring. It is not a regular expression.",
 		"- Every citation is checked against the file before the answer is delivered. A quote that is not found on that exact line is discarded.",
 		"- Never invent a path, a line number, or a quote. If you did not read it, do not cite it.",

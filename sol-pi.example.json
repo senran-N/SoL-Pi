@@ -12,5 +12,6 @@
 	"scopedExplorationProvider": "provider-id",
 	"scopedExplorationModel": "model-id",
 	"scopedExplorationMaxSteps": 8,
+	"scopedExplorationExcludedPaths": [".env", ".env.*", "**/*credential*", "**/*secret*", "**/*.pem", "**/*.key"],
 	"cacheWriteReadRatio": 12.5
 }

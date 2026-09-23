@@ -167,9 +167,13 @@ export function decideCompaction(input: {
 						horizon.windowRequestUpperBound ?? Number.POSITIVE_INFINITY,
 					)
 				: horizon.expectedRemainingRequests;
+	const windowReserveTokens =
+		input.contextWindowTokens === null
+			? input.economics.windowReserveTokens
+			: Math.min(input.economics.windowReserveTokens, input.contextWindowTokens * 0.25);
 	const windowProtection =
 		input.contextWindowTokens !== null &&
-		input.contextTokens >= input.contextWindowTokens - input.economics.windowReserveTokens;
+		input.contextTokens >= input.contextWindowTokens - windowReserveTokens;
 	const baseEconomic =
 		horizon !== null &&
 		horizon.expectedRemainingRequests > 0 &&

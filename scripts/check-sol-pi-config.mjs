@@ -23,6 +23,7 @@ const DEFAULT_EPR_REDUCER_MODEL = ["gpt-5.6", "luna"].join("-");
 const DEFAULT_EXPLORER_PROVIDER = DEFAULT_EPR_REDUCER_PROVIDER;
 const DEFAULT_EXPLORER_MODEL = DEFAULT_EPR_REDUCER_MODEL;
 const DEFAULT_EXPLORATION_MAX_STEPS = 8;
+const DEFAULT_EXCLUDED_PATHS = [".env", ".env.*", "**/*credential*", "**/*secret*", "**/*.pem", "**/*.key"];
 const MIN_EXPLORATION_MAX_STEPS = 1;
 const MAX_EXPLORATION_MAX_STEPS = 32;
 const STRING_KEYS = [
@@ -38,6 +39,7 @@ const CONFIG_KEYS = new Set([
 	"cacheWriteReadRatio",
 	"commandYieldTimeMs",
 	"scopedExplorationMaxSteps",
+	"scopedExplorationExcludedPaths",
 ]);
 
 function fail(message) {
@@ -133,6 +135,14 @@ function validateConfig(value, requireAllEnabled) {
 		);
 	}
 	effective.scopedExplorationMaxSteps = scopedExplorationMaxSteps;
+	const scopedExplorationExcludedPaths = Object.hasOwn(value, "scopedExplorationExcludedPaths")
+		? value.scopedExplorationExcludedPaths
+		: DEFAULT_EXCLUDED_PATHS;
+	if (!Array.isArray(scopedExplorationExcludedPaths) ||
+		!scopedExplorationExcludedPaths.every((pattern) => typeof pattern === "string" && pattern.length > 0)) {
+		fail("scopedExplorationExcludedPaths must be a string array of non-empty patterns");
+	}
+	effective.scopedExplorationExcludedPaths = scopedExplorationExcludedPaths;
 	effective.evidencePreservingReducerModel = stringConfigValue(
 		value,
 		"evidencePreservingReducerModel",

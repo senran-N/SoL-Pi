@@ -29,11 +29,12 @@ The project file replaces the global file. SoL-Pi does not merge them.
   "scopedExplorationProvider": "provider-id",
   "scopedExplorationModel": "model-id",
   "scopedExplorationMaxSteps": 8,
+  "scopedExplorationExcludedPaths": [".env", ".env.*", "**/*credential*", "**/*secret*", "**/*.pem", "**/*.key"],
   "cacheWriteReadRatio": 12.5
 }
 ```
 
-Feature keys may be omitted and then default to `false`. `cacheWriteReadRatio` may be omitted and then defaults to `12.5`; when present it must be a finite non-negative number, and `0` explicitly means that a cache write adds no cost relative to a cache read. `commandYieldTimeMs` may be omitted and then defaults to `10000`; when present it must be an integer between `1000` and `300000`. `evidencePreservingReducerProvider` and `evidencePreservingReducerModel` may be omitted and then use the built-in reducer route; when present each must be a non-empty string. `scopedExplorationProvider` and `scopedExplorationModel` may be omitted and then use the built-in explorer route, which is the same route Evidence-Preserving Reducer defaults to; when present each must be a non-empty string. `scopedExplorationMaxSteps` may be omitted and then defaults to `8`; when present it must be an integer between `1` and `32`. Unknown keys, unsupported versions, malformed JSON, non-boolean feature values, invalid ratios, invalid yield deadlines, invalid reducer model fields, invalid explorer model fields, and invalid step budgets stop extension loading with a direct error.
+Feature keys may be omitted and then default to `false`. `cacheWriteReadRatio` may be omitted and then defaults to `12.5`; when present it must be a finite non-negative number, and `0` explicitly means that a cache write adds no cost relative to a cache read. `commandYieldTimeMs` may be omitted and then defaults to `10000`; when present it must be an integer between `1000` and `300000`. `evidencePreservingReducerProvider` and `evidencePreservingReducerModel` may be omitted and then use the built-in reducer route; when present each must be a non-empty string. `scopedExplorationProvider` and `scopedExplorationModel` may be omitted and then use the built-in explorer route, which is the same route Evidence-Preserving Reducer defaults to; when present each must be a non-empty string. `scopedExplorationMaxSteps` may be omitted and then defaults to `8`; when present it must be an integer between `1` and `32`. `scopedExplorationExcludedPaths` may be omitted and then defaults to common environment, credential, secret, PEM, and key patterns; when present it must be an array of non-empty strings. Unknown keys, unsupported versions, malformed JSON, non-boolean feature values, invalid ratios, invalid yield deadlines, invalid reducer model fields, invalid explorer model fields, invalid step budgets, and invalid exclusion patterns stop extension loading with a direct error.
 
 For the managed all-enabled installation described in the [agent installation and configuration protocol](../agents-install.md), validate the effective file before starting Pi:
 
@@ -59,6 +60,7 @@ This preflight does not make every valid SoL-Pi configuration all-enabled. Witho
 - `scopedExplorationProvider`: provider namespace used to resolve the explorer model through Pi's model registry.
 - `scopedExplorationModel`: model id used for Scoped Exploration.
 - `scopedExplorationMaxSteps`: how many actions one exploration may take before it must answer.
+- `scopedExplorationExcludedPaths`: glob patterns excluded from exploration search, reads, listings, and citation verification; the defaults prevent common secret-bearing files from being sent to the explorer model.
 - `cacheWriteReadRatio`: supplies the single economic decision ratio used by Online Context Compact.
 
 ## Evidence-Preserving Reducer runtime inputs
@@ -88,7 +90,7 @@ Image handling remains Pi's responsibility. Pi 0.87 normalizes prompt and tool-r
 
 The release entry uses the configured explorer route and a step budget; storage comes from the session.
 
-The explorer never reaches Pi's tools. It emits one JSON action per step and SoL-Pi executes it against three read-only primitives - a literal, case-insensitive substring search, a bounded file read, and a directory listing - each confined to the project root, each refusing a path that resolves outside it, and each skipping vendored directories. There is no write, no command, and no network action in the protocol, so the exploration is read-only by construction rather than by permission.
+The explorer never reaches Pi's tools. It emits one JSON action per step and SoL-Pi executes it against three read-only primitives - a literal, case-insensitive substring search, a bounded file read, and a directory listing - each confined to the project root, each refusing a path that resolves outside it, each applying the configured exclusion patterns, and each skipping vendored directories. There is no write, no command, and no network action in the protocol, so the exploration is read-only by construction rather than by permission.
 
 What comes back is checked. Every citation names a path, a line, and a quote, and it survives only when that quote is found at that line at delivery time. A rejected citation is reported as rejected; an answer that claims a finding and has no surviving citation is refused outright rather than handed to the agent as a plausible summary. An exploration that runs out of steps, times out, or cannot resolve its model fails the tool call, which leaves the agent to do the search itself. The full step-by-step transcript is written to `<runtimeRoot>/scoped-exploration/<exploration-id>.jsonl` and its path travels back with the answer, so what the main window did not see is still auditable.
 

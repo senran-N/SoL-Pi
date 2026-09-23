@@ -68,6 +68,33 @@ describe("Online Context Compact economics", () => {
 		).toMatchObject({ compact: true, reason: "window_protection" });
 	});
 
+	it.each([
+		{ windowTokens: 8_000, triggerTokens: 6_000, deferTokens: 5_999 },
+		{ windowTokens: 32_000, triggerTokens: 24_000, deferTokens: 23_999 },
+		{ windowTokens: 200_000, triggerTokens: 183_616, deferTokens: 183_615 },
+	])(
+		"scales the window-protection reserve for a $windowTokens-token context window",
+		({ windowTokens, triggerTokens, deferTokens }) => {
+			const economics = DEFAULT_COMPACTION_ECONOMICS;
+			const atThreshold = decision({
+				contextWindowTokens: windowTokens,
+				contextTokens: triggerTokens,
+				cacheWriteReadRatio: 100,
+			});
+			const belowThreshold = decision({
+				contextWindowTokens: windowTokens,
+				contextTokens: deferTokens,
+				cacheWriteReadRatio: 100,
+			});
+
+			expect(atThreshold).toMatchObject({ compact: true, reason: "window_protection" });
+			expect(belowThreshold.reason).not.toBe("window_protection");
+			if (windowTokens <= economics.windowReserveTokens * 4) {
+				expect(belowThreshold.compact).toBe(false);
+			}
+		},
+	);
+
 	it("defers economic compaction when no cache ratio is available", () => {
 		expect(decision({ cacheWriteReadRatio: null })).toMatchObject({
 			compact: false,

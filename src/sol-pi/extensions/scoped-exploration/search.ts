@@ -17,7 +17,7 @@
  */
 import type { Dirent, Stats } from "node:fs";
 import { lstat, readFile, readdir, realpath } from "node:fs/promises";
-import { isAbsolute, join, relative, resolve, sep } from "node:path";
+import { isAbsolute, join, relative, resolve, sep, matchesGlob } from "node:path";
 import {
 	GREP_MAX_HITS,
 	LIST_MAX_ENTRIES,
@@ -28,6 +28,20 @@ import {
 } from "./config.ts";
 
 export type GrepHit = { readonly path: string; readonly line: number; readonly text: string };
+
+export function isExcluded(root: string, file: string, patterns: readonly string[]): boolean {
+	const path = relativePath(root, file);
+	// A basename exclusion applies at every depth; a directory exclusion applies
+	// to its descendants as well. Explicit path globs still match the full path.
+	const segments = path.split("/");
+	return patterns.some((pattern) => {
+		if (pattern.includes("/")) {
+			return matchesGlob(path, pattern) || segments.some((_, index) => matchesGlob(segments.slice(0, index + 1).join("/"), pattern));
+		}
+		return segments.some((segment) => matchesGlob(segment, pattern));
+	});
+}
+
 export type ReadSlice = { readonly path: string; readonly firstLine: number; readonly lines: readonly string[]; readonly eof: boolean };
 
 const BINARY_PROBE_BYTES = 8_192;
@@ -51,7 +65,7 @@ export async function resolveInside(root: string, candidate: string): Promise<st
 		resolved = resolve(target);
 	}
 	const rooted = relative(rootReal, resolved);
-	if (rooted.startsWith("..") || isAbsolute(rooted)) {
+	if (rooted === ".." || rooted.startsWith(`..${sep}`) || isAbsolute(rooted)) {
 		throw new Error(`Path is outside the project: ${candidate}`);
 	}
 	return resolved;
@@ -71,7 +85,7 @@ function clampLine(text: string): string {
 	return collapsed.length > MAX_LINE_CHARS ? `${collapsed.slice(0, MAX_LINE_CHARS)}...` : collapsed;
 }
 
-async function* walk(root: string, start: string, budget: { remaining: number }): AsyncGenerator<string> {
+async function* walk(root: string, start: string, budget: { remaining: number }, excludedPaths: readonly string[]): AsyncGenerator<string> {
 	let entries: Dirent[];
 	try {
 		entries = await readdir(start, { withFileTypes: true });
@@ -86,11 +100,11 @@ async function* walk(root: string, start: string, budget: { remaining: number })
 		// the whole filesystem into a single grep.
 		if (entry.isSymbolicLink()) continue;
 		if (entry.isDirectory()) {
-			if (SKIPPED_DIRECTORIES.has(entry.name)) continue;
-			yield* walk(root, full, budget);
+			if (SKIPPED_DIRECTORIES.has(entry.name) || isExcluded(root, full, excludedPaths)) continue;
+			yield* walk(root, full, budget, excludedPaths);
 			continue;
 		}
-		if (!entry.isFile()) continue;
+		if (!entry.isFile() || isExcluded(root, full, excludedPaths)) continue;
 		budget.remaining -= 1;
 		yield full;
 	}
@@ -100,6 +114,7 @@ export async function grepFiles(input: {
 	readonly root: string;
 	readonly pattern: string;
 	readonly path?: string;
+	readonly excludedPaths?: readonly string[];
 }): Promise<{ readonly hits: readonly GrepHit[]; readonly truncated: boolean; readonly scanned: number }> {
 	const needle = input.pattern.toLowerCase();
 	if (needle.length === 0) throw new Error("Search pattern must not be empty");
@@ -110,11 +125,14 @@ export async function grepFiles(input: {
 	const rootReal = await realpath(input.root);
 	const start = input.path ? await resolveInside(input.root, input.path) : rootReal;
 	const budget = { remaining: SCAN_MAX_FILES };
+	const excludedPaths = input.excludedPaths ?? [];
 	const hits: GrepHit[] = [];
 	let truncated = false;
 
 	const startStats: Stats = await lstat(start);
-	const files = startStats.isDirectory() ? walk(rootReal, start, budget) : (async function* () { yield start; })();
+	const files = startStats.isDirectory()
+		? walk(rootReal, start, budget, excludedPaths)
+		: (async function* () { if (!isExcluded(rootReal, start, excludedPaths)) yield start; })();
 
 	for await (const file of files) {
 		if (hits.length >= GREP_MAX_HITS) {
@@ -152,11 +170,13 @@ export async function grepFiles(input: {
 export async function readSlice(input: {
 	readonly root: string;
 	readonly path: string;
+	readonly excludedPaths?: readonly string[];
 	readonly offset?: number;
 	readonly limit?: number;
 }): Promise<ReadSlice> {
 	const rootReal = await realpath(input.root);
 	const file = await resolveInside(input.root, input.path);
+	if (isExcluded(rootReal, file, input.excludedPaths ?? [])) throw new Error(`Path is excluded: ${input.path}`);
 	const stats = await lstat(file);
 	if (!stats.isFile()) throw new Error(`Not a readable file: ${input.path}`);
 	if (stats.size > SCAN_MAX_FILE_BYTES) throw new Error(`File is too large to read here: ${input.path}`);
@@ -178,14 +198,18 @@ export async function readSlice(input: {
 export async function listDirectory(input: {
 	readonly root: string;
 	readonly path?: string;
+	readonly excludedPaths?: readonly string[];
 }): Promise<{ readonly path: string; readonly entries: readonly string[]; readonly truncated: boolean }> {
 	const rootReal = await realpath(input.root);
 	const directory = input.path ? await resolveInside(input.root, input.path) : rootReal;
+	const excludedPaths = input.excludedPaths ?? [];
+	if (isExcluded(rootReal, directory, excludedPaths)) throw new Error(`Path is excluded: ${input.path}`);
 	const stats = await lstat(directory);
 	if (!stats.isDirectory()) throw new Error(`Not a directory: ${input.path ?? "."}`);
 	const found = await readdir(directory, { withFileTypes: true });
 	const entries = found
-		.filter((entry) => !(entry.isDirectory() && SKIPPED_DIRECTORIES.has(entry.name)))
+		.filter((entry) => !entry.isSymbolicLink() && !(entry.isDirectory() && SKIPPED_DIRECTORIES.has(entry.name)) &&
+			!isExcluded(rootReal, join(directory, entry.name), excludedPaths))
 		.map((entry) => (entry.isDirectory() ? `${entry.name}/` : entry.name))
 		.sort();
 	return {
@@ -196,9 +220,11 @@ export async function listDirectory(input: {
 }
 
 /** The exact line a citation points at, or undefined when it does not exist. */
-export async function lineAt(root: string, path: string, line: number): Promise<string | undefined> {
+export async function lineAt(root: string, path: string, line: number, excludedPaths: readonly string[] = []): Promise<string | undefined> {
 	if (!Number.isSafeInteger(line) || line < 1) return undefined;
+	const rootReal = await realpath(root);
 	const file = await resolveInside(root, path);
+	if (isExcluded(rootReal, file, excludedPaths)) throw new Error("path is excluded");
 	let stats: Stats;
 	try {
 		stats = await lstat(file);

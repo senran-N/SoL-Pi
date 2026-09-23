@@ -16,6 +16,7 @@ import {
 	DEFAULT_REDUCER_PROVIDER,
 } from "./extensions/evidence-preserving-reducer/config.ts";
 import {
+	DEFAULT_EXCLUDED_PATHS,
 	DEFAULT_EXPLORER_MODEL,
 	DEFAULT_EXPLORER_PROVIDER,
 	DEFAULT_MAX_STEPS,
@@ -39,6 +40,7 @@ export interface SolPiConfig {
 	readonly scopedExplorationModel: string;
 	readonly scopedExplorationProvider: string;
 	readonly scopedExplorationMaxSteps: number;
+	readonly scopedExplorationExcludedPaths: readonly string[];
 	readonly cacheWriteReadRatio: number;
 }
 
@@ -56,6 +58,7 @@ export const DEFAULT_CONFIG: SolPiConfig = Object.freeze({
 	scopedExplorationModel: DEFAULT_EXPLORER_MODEL,
 	scopedExplorationProvider: DEFAULT_EXPLORER_PROVIDER,
 	scopedExplorationMaxSteps: DEFAULT_MAX_STEPS,
+	scopedExplorationExcludedPaths: DEFAULT_EXCLUDED_PATHS,
 	cacheWriteReadRatio: DEFAULT_CACHE_WRITE_READ_RATIO,
 });
 
@@ -80,6 +83,7 @@ const CONFIG_KEYS = new Set<string>([
 	"cacheWriteReadRatio",
 	"commandYieldTimeMs",
 	"scopedExplorationMaxSteps",
+	"scopedExplorationExcludedPaths",
 ]);
 
 export function findConfigPath(
@@ -150,6 +154,15 @@ export function loadSolPiConfig(
 			`SoL-Pi config commandYieldTimeMs must be an integer between ${MIN_YIELD_TIME_MS} and ${MAX_YIELD_TIME_MS}: ${path}`,
 		);
 	}
+	const scopedExplorationExcludedPaths = Object.hasOwn(record, "scopedExplorationExcludedPaths")
+		? record.scopedExplorationExcludedPaths
+		: DEFAULT_EXCLUDED_PATHS;
+	if (
+		!Array.isArray(scopedExplorationExcludedPaths) ||
+		!scopedExplorationExcludedPaths.every((value) => typeof value === "string" && value.length > 0)
+	) {
+		throw new Error(`SoL-Pi config scopedExplorationExcludedPaths must be a non-empty string array: ${path}`);
+	}
 	const scopedExplorationMaxSteps = Object.hasOwn(record, "scopedExplorationMaxSteps")
 		? record.scopedExplorationMaxSteps
 		: DEFAULT_MAX_STEPS;
@@ -191,6 +204,7 @@ export function loadSolPiConfig(
 		evidencePreservingReducerModel,
 		evidencePreservingReducerProvider,
 		scopedExplorationMaxSteps,
+		scopedExplorationExcludedPaths: Object.freeze([...scopedExplorationExcludedPaths]),
 		scopedExplorationModel,
 		scopedExplorationProvider,
 	}) as SolPiConfig;

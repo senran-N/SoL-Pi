@@ -5,8 +5,8 @@
 import type { AgentMessage, AgentToolResult } from "@earendil-works/pi-agent-core";
 import {
 	buildSessionContext,
+	buildSessionProjection,
 	estimateTokens,
-	findCutPoint,
 	sessionEntryToContextMessages,
 	type ExtensionContext,
 	type ExtensionFactory,
@@ -137,15 +137,6 @@ function progressSummary(input: PlanUpdateInput, completedStepId: string): Progr
 	};
 }
 
-function compactionMessageCount(entries: readonly SessionEntry[], startIndex: number, endIndex: number): number {
-	let count = 0;
-	for (let index = startIndex; index < endIndex; index++) {
-		const entry = entries[index];
-		if (entry && entry.type !== "compaction" && sessionEntryToContextMessages(entry).length > 0) count++;
-	}
-	return count;
-}
-
 function branchAfterAbort(entries: readonly SessionEntry[]): SessionEntry[] {
 	const last = entries.at(-1);
 	const markerProvider = ["sol", "pi"].join("-");
@@ -177,25 +168,129 @@ function branchAfterAbort(entries: readonly SessionEntry[]): SessionEntry[] {
 	];
 }
 
+function isProjectedCutPoint(message: AgentMessage): boolean {
+	switch (message.role) {
+		case "user":
+		case "assistant":
+		case "bashExecution":
+		case "custom":
+		case "branchSummary":
+		case "compactionSummary":
+			return true;
+		default:
+			return false;
+	}
+}
+
+function isProjectedTurnStart(message: AgentMessage): boolean {
+	switch (message.role) {
+		case "user":
+		case "bashExecution":
+		case "custom":
+		case "branchSummary":
+		case "compactionSummary":
+			return true;
+		default:
+			return false;
+	}
+}
+
+/**
+ * Pi 0.87 prepares compaction from its projected branch, not the raw entries:
+ * context edits can make an apparently large transcript too small to cut.
+ * Mirror the public projection's cut-point rules here so OCC doesn't schedule
+ * a compaction that AgentSession.compact will reject as "Nothing to compact".
+ */
 function nativeCompactionFeasible(entries: readonly SessionEntry[], keepRecentTokens: number): boolean {
 	const path = branchAfterAbort(entries);
-	let startIndex = 0;
-	for (let index = path.length - 1; index >= 0; index--) {
-		const entry = path[index];
-		if (entry?.type !== "compaction") continue;
-		const keptIndex = path.findIndex((item) => item.id === entry.firstKeptEntryId);
-		startIndex = keptIndex >= 0 ? keptIndex : index + 1;
-		break;
+	const projection = buildSessionProjection([...path]);
+	const projectedEntries = projection.entries;
+	const previousCompactionIndex = projectedEntries.findIndex(
+		(entry) => entry.sourceEntry.type === "compaction" && entry.messages.length > 0,
+	);
+	const boundaryStart = previousCompactionIndex >= 0 ? previousCompactionIndex + 1 : 0;
+	const boundaryEnd = projectedEntries.length;
+
+	const cutPoints: number[] = [];
+	for (let index = boundaryStart; index < boundaryEnd; index++) {
+		const entry = projectedEntries[index];
+		if (entry && entry.sourceEntry.type !== "compaction" && entry.messages.some(isProjectedCutPoint)) {
+			cutPoints.push(index);
+		}
 	}
 
-	const cut = findCutPoint(path, startIndex, path.length, keepRecentTokens);
-	const historyEnd = cut.isSplitTurn ? cut.turnStartIndex : cut.firstKeptEntryIndex;
-	const historyMessages = historyEnd > startIndex ? compactionMessageCount(path, startIndex, historyEnd) : 0;
-	const prefixMessages =
-		cut.isSplitTurn && cut.turnStartIndex >= 0
-			? compactionMessageCount(path, cut.turnStartIndex, cut.firstKeptEntryIndex)
-			: 0;
-	return historyMessages > 0 || prefixMessages > 0;
+	let firstKeptEntryIndex = boundaryStart;
+	let exceededBudget = false;
+	if (cutPoints.length > 0) {
+		let accumulatedTokens = 0;
+		firstKeptEntryIndex = cutPoints[0]!;
+		for (let index = boundaryEnd - 1; index >= boundaryStart; index--) {
+			const entry = projectedEntries[index];
+			if (!entry) continue;
+			const messageTokens = entry.messages.reduce((sum, message) => sum + estimateTokens(message), 0);
+			if (messageTokens === 0) continue;
+			accumulatedTokens += messageTokens;
+			if (accumulatedTokens < keepRecentTokens) continue;
+			exceededBudget = true;
+			firstKeptEntryIndex = cutPoints.find((candidate) => candidate >= index) ?? cutPoints[cutPoints.length - 1]!;
+			break;
+		}
+
+		// Keep an assistant message visible when a context edit omitted the
+		// assistant tail without supplying an external replacement.
+		const suffix = projectedEntries.slice(firstKeptEntryIndex + 1, boundaryEnd);
+		const isIntrinsicallyVisible = (entry: (typeof projectedEntries)[number]): boolean =>
+			entry.sourceEntry.type !== "context_edit" && sessionEntryToContextMessages(entry.sourceEntry).length > 0;
+		const isOmitted = (entry: (typeof projectedEntries)[number]): boolean =>
+			isIntrinsicallyVisible(entry) && entry.messages.length === 0;
+		const omittedSuffixIds = new Set(
+			suffix.filter(isOmitted).map((entry) => entry.sourceEntry.id),
+		);
+		const hasExternalReplacement = suffix.some(
+			(entry) =>
+				entry.sourceEntry.type === "context_edit" &&
+				entry.sourceEntry.replacement !== null &&
+				!omittedSuffixIds.has(entry.sourceEntry.targetId),
+		);
+		if (
+			exceededBudget &&
+			!hasExternalReplacement &&
+			suffix.some((entry) => entry.sourceEntry.type === "message" && entry.sourceEntry.message.role === "assistant" && isOmitted(entry)) &&
+			suffix.every((entry) => entry.sourceEntry.type !== "compaction" && (!isIntrinsicallyVisible(entry) || isOmitted(entry)))
+		) {
+			firstKeptEntryIndex++;
+		}
+		while (firstKeptEntryIndex > boundaryStart) {
+			const previous = projectedEntries[firstKeptEntryIndex - 1];
+			if (!previous || previous.sourceEntry.type === "compaction" || previous.messages.length > 0) break;
+			firstKeptEntryIndex--;
+		}
+	}
+
+	const firstKept = projectedEntries[firstKeptEntryIndex];
+	const startsTurn = firstKept !== undefined &&
+		firstKept.sourceEntry.type !== "compaction" && firstKept.messages.some(isProjectedTurnStart);
+	let turnStartIndex = -1;
+	if (!startsTurn) {
+		for (let index = firstKeptEntryIndex; index >= boundaryStart; index--) {
+			const entry = projectedEntries[index];
+			if (entry && entry.sourceEntry.type !== "compaction" && entry.messages.some(isProjectedTurnStart)) {
+				turnStartIndex = index;
+				break;
+			}
+		}
+	}
+	const isSplitTurn = !startsTurn && turnStartIndex !== -1;
+	const historyEnd = isSplitTurn ? turnStartIndex : firstKeptEntryIndex;
+	const historyMessages = projectedEntries
+		.slice(boundaryStart, historyEnd)
+		.flatMap((entry) => entry.sourceEntry.type === "compaction" ? [] : entry.messages.filter((message) => message.role !== "system"));
+	const prefixMessages = isSplitTurn
+		? projectedEntries
+				.slice(turnStartIndex, firstKeptEntryIndex)
+				.flatMap((entry) => entry.sourceEntry.type === "compaction" ? [] : entry.messages.filter((message) => message.role !== "system"))
+		: [];
+	return historyMessages.length > 0 || prefixMessages.length > 0;
 }
 
 function validPositiveInteger(value: unknown): value is number {
@@ -697,10 +792,13 @@ export function createOnlineContextCompactExtension(options: OnlineContextCompac
 					});
 				});
 				compactionInFlight = false;
+				const nativeNoop = compactionError?.message.includes("Nothing to compact (session too small)") ||
+					compactionError?.message.includes("Already compacted");
 				if (
 					compactionError &&
 					compactionError.name !== "AbortError" &&
-					compactionError.message !== "Compaction cancelled"
+					compactionError.message !== "Compaction cancelled" &&
+					!nativeNoop
 				) {
 					throw compactionError;
 				}

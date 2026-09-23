@@ -48,6 +48,15 @@ export const LIST_MAX_ENTRIES = 100;
 export const SCAN_MAX_FILES = 2_000;
 export const SCAN_MAX_FILE_BYTES = 1_048_576;
 
+export const DEFAULT_EXCLUDED_PATHS: readonly string[] = [
+	".env",
+	".env.*",
+	"**/*credential*",
+	"**/*secret*",
+	"**/*.pem",
+	"**/*.key",
+];
+
 export const SKIPPED_DIRECTORIES: ReadonlySet<string> = new Set([
 	".git",
 	".pi",
@@ -61,6 +70,7 @@ export const SKIPPED_DIRECTORIES: ReadonlySet<string> = new Set([
 ]);
 
 export interface ExplorationConfig {
+	readonly excludedPaths: readonly string[];
 	readonly explorerModel: string;
 	readonly explorerProvider: string;
 	readonly maxOutputTokens: number;
@@ -70,6 +80,7 @@ export interface ExplorationConfig {
 }
 
 export interface ExplorationConfigOptions {
+	readonly excludedPaths?: readonly string[];
 	readonly explorerModel?: string;
 	readonly explorerProvider?: string;
 	readonly maxSteps?: number;
@@ -90,6 +101,7 @@ export function loadExplorationConfig(
 	options: ExplorationConfigOptions = {},
 ): ExplorationConfig {
 	return Object.freeze({
+		excludedPaths: Object.freeze([...(options.excludedPaths ?? DEFAULT_EXCLUDED_PATHS)]),
 		explorerModel: options.explorerModel ?? DEFAULT_EXPLORER_MODEL,
 		explorerProvider: options.explorerProvider ?? DEFAULT_EXPLORER_PROVIDER,
 		maxOutputTokens: DEFAULT_MAX_OUTPUT_TOKENS,

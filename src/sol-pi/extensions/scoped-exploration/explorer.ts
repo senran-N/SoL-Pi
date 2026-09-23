@@ -90,18 +90,18 @@ function explorationSignal(parent: AbortSignal | undefined, timeoutMs: number): 
 	};
 }
 
-async function observe(root: string, action: Exclude<ReturnType<typeof parseAction>, undefined>): Promise<string> {
+async function observe(root: string, action: Exclude<ReturnType<typeof parseAction>, undefined>, excludedPaths: readonly string[]): Promise<string> {
 	switch (action.kind) {
 		case "grep": {
-			const found = await grepFiles({ root, pattern: action.pattern, path: action.path });
+			const found = await grepFiles({ root, pattern: action.pattern, path: action.path, excludedPaths });
 			return formatGrepObservation({ pattern: action.pattern, hits: found.hits, truncated: found.truncated });
 		}
 		case "read": {
-			const slice = await readSlice({ root, path: action.path, offset: action.offset, limit: action.limit });
+			const slice = await readSlice({ root, path: action.path, excludedPaths, offset: action.offset, limit: action.limit });
 			return formatReadObservation(slice);
 		}
 		case "list": {
-			const listing = await listDirectory({ root, path: action.path });
+			const listing = await listDirectory({ root, path: action.path, excludedPaths });
 			return formatListObservation(listing);
 		}
 		case "answer":
@@ -115,7 +115,7 @@ export async function runExploration(input: ExplorationInput): Promise<Explorati
 	const transcript = createTranscript(input.config.storeRoot, id);
 	const operation = explorationSignal(input.signal, input.config.timeoutMs);
 	const turns: ExplorerTurn[] = [{ role: "user", text: explorerTask(input.question) }];
-	const instructions = explorerInstructions(input.config.maxSteps);
+	const instructions = explorerInstructions(input.config.maxSteps, input.config.excludedPaths);
 	let observedBytes = 0;
 
 	await transcript({
@@ -153,7 +153,7 @@ export async function runExploration(input: ExplorationInput): Promise<Explorati
 			}
 
 			if (action.kind === "answer") {
-				const check = await verifyCitations(input.root, action.citations);
+				const check = await verifyCitations(input.root, action.citations, input.config.excludedPaths);
 				await transcript({
 					event: "answer",
 					step,
@@ -192,7 +192,7 @@ export async function runExploration(input: ExplorationInput): Promise<Explorati
 
 			let observation: string;
 			try {
-				observation = await observe(input.root, action);
+				observation = await observe(input.root, action, input.config.excludedPaths);
 			} catch (error) {
 				observation = `That action failed: ${error instanceof Error ? error.message : String(error)}`;
 			}

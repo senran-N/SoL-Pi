@@ -14,6 +14,8 @@ import {
 	ExplorationIncompleteError,
 	ExplorerModelUnavailableError,
 	grepFiles,
+	listDirectory,
+	readSlice,
 	loadExplorationConfig,
 	parseAction,
 	resolveInside,
@@ -87,6 +89,24 @@ describe("scoped exploration search primitives", () => {
 	it("refuses a path that climbs out of the project", async () => {
 		const root = await project();
 		await expect(resolveInside(root, "../outside.txt")).rejects.toThrow(/outside the project/u);
+	});
+
+	it("hides excluded paths at every depth from listing, reading, searching, and citation checks", async () => {
+		const root = await project();
+		await mkdir(join(root, "src", "nested"), { recursive: true });
+		await writeFile(join(root, "src", "nested", ".env"), "PRIVATE_MARKER=hidden\n");
+		await writeFile(join(root, "src", "nested", "creds.pem"), "PRIVATE_MARKER=pem\n");
+		await writeFile(join(root, "src", "nested", "secret-dir.txt"), "PRIVATE_MARKER=secret\n");
+		const excludedPaths = loadExplorationConfig(root).excludedPaths;
+		const listing = await listDirectory({ root, path: "src/nested", excludedPaths });
+		expect(listing.entries).toEqual([]);
+		await expect(listDirectory({ root, path: "src/nested/.env", excludedPaths })).rejects.toThrow(/excluded/u);
+		await expect(readSlice({ root, path: "src/nested/.env", excludedPaths })).rejects.toThrow(/excluded/u);
+		const hits = await grepFiles({ root, pattern: "PRIVATE_MARKER", excludedPaths });
+		expect(hits.hits).toEqual([]);
+		const checked = await verifyCitations(root, [{ path: "src/nested/.env", line: 1, quote: "PRIVATE_MARKER=hidden" }], excludedPaths);
+		expect(checked.verified).toEqual([]);
+		expect(checked.rejected[0]?.reason).toBe("path is excluded");
 	});
 });
 

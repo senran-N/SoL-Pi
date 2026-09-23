@@ -46,13 +46,17 @@ export function parseCitations(value: unknown): readonly Citation[] | undefined 
 	return citations;
 }
 
-export async function verifyCitations(root: string, citations: readonly Citation[]): Promise<CitationCheck> {
+export async function verifyCitations(
+	root: string,
+	citations: readonly Citation[],
+	excludedPaths: readonly string[] = [],
+): Promise<CitationCheck> {
 	const verified: Citation[] = [];
 	const rejected: RejectedCitation[] = [];
 	for (const citation of citations) {
 		let actual: string | undefined;
 		try {
-			actual = await lineAt(root, citation.path, citation.line);
+			actual = await lineAt(root, citation.path, citation.line, excludedPaths);
 		} catch (error) {
 			rejected.push({ citation, reason: error instanceof Error ? error.message : String(error) });
 			continue;
