@@ -136,12 +136,18 @@ describe("get_context_remaining", () => {
 		const plan = pi.tool("update_plan").execute as Execute;
 		await plan("open", { steps: OPEN }, undefined, undefined, context);
 		await plan("done", { steps: DONE, progress: PROGRESS }, undefined, undefined, context);
-		await pi.emit("turn_end", {
+		const boundaryResult = await pi.emit("turn_end", {
 			type: "turn_end", turnIndex: 1, message: assistant("boundary"),
 			toolResults: [{ role: "toolResult", toolCallId: "done", toolName: "update_plan", content: [], isError: false, timestamp: Date.now() }],
 		}, context);
 		expect(getContextUsage).toHaveBeenCalledTimes(3);
-		expect(abort).toHaveBeenCalledTimes(protectsWindow ? 1 : 0);
+		expect(abort).not.toHaveBeenCalled();
+		if (protectsWindow) {
+			expect((boundaryResult as { continue?: boolean }).continue).toBe(true);
+			expect((boundaryResult as { entries?: Array<{ type: string; firstKeptEntryId?: string | null }> }).entries?.find((entry) => entry.type === "compaction")?.firstKeptEntryId).toBeNull();
+		} else {
+			expect(boundaryResult).toBeUndefined();
+		}
 	});
 
 	it.each([undefined, { tokens: null, contextWindow: 0, percent: null }])(
@@ -158,6 +164,22 @@ describe("get_context_remaining", () => {
 			expect(result.details).toMatchObject({ tokens: 100, context_window: 8_000, remaining_tokens: 7_900, percent: 1.25 });
 		},
 	);
+
+	it("re-estimates budget from the live system prompt on each call", async () => {
+		const pi = new FakePi();
+		createOnlineContextCompactExtension()(pi.asExtensionApi());
+		let systemPrompt = "s".repeat(400);
+		const context = fakeContext(pi.sessionManager, {
+			getContextUsage: () => ({ tokens: 1, contextWindow: 2_000, percent: 0 }),
+			getSystemPrompt: () => systemPrompt,
+		});
+		const remaining = pi.tool("get_context_remaining").execute as Execute;
+		const first = await remaining("budget-1", {}, undefined, undefined, context);
+		systemPrompt = "s".repeat(800);
+		const second = await remaining("budget-2", {}, undefined, undefined, context);
+		expect(first.details).toMatchObject({ tokens: 100, token_source: "local_estimate" });
+		expect(second.details).toMatchObject({ tokens: 200, token_source: "local_estimate" });
+	});
 
 	it("recomputes the percentage when usage is unknown just after compaction", async () => {
 		const pi = new FakePi();

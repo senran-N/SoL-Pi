@@ -10,6 +10,7 @@ import {
 	sessionEntryToContextMessages,
 	type ExtensionContext,
 	type ExtensionFactory,
+	type SessionBoundaryDraft,
 	type SessionEntry,
 } from "@earendil-works/pi-coding-agent";
 import { formatSavingsCount, showSolPiSavings } from "../../tui.ts";
@@ -24,6 +25,7 @@ import { analyzePlanTransition, formatPlanSnapshot, parsePlanSteps } from "./pla
 import {
 	appendOnlineState,
 	initialOnlineState,
+	ONLINE_STATE_ENTRY,
 	recordBoundary,
 	recordCompaction,
 	recordCorrection,
@@ -216,6 +218,10 @@ export function createOnlineContextCompactExtension(options: OnlineContextCompac
 		// depend on a priced decision, but it is still applied at the next idle
 		// settlement so the tool never aborts the turn that called it.
 		let resetRequested = false;
+		// State included in a turn_end boundary is persisted by Pi before the next
+		// request. Do not use it early: if boundary validation rejects the draft,
+		// restore the last committed state from the session branch instead.
+		let pendingBoundaryState: OnlineState | undefined;
 		let compactionInFlight = false;
 
 		const restore = (context: ExtensionContext): void => {
@@ -229,6 +235,7 @@ export function createOnlineContextCompactExtension(options: OnlineContextCompac
 			selected = undefined;
 			activeDebt = undefined;
 			pendingReset = undefined;
+			pendingBoundaryState = undefined;
 			resetRequested = false;
 			compactionInFlight = false;
 		};
@@ -435,6 +442,11 @@ export function createOnlineContextCompactExtension(options: OnlineContextCompac
 
 		pi.on("before_provider_request", (_event, context) => {
 			ensureRestored(context);
+			if (pendingBoundaryState) {
+				state = pendingBoundaryState;
+				pendingBoundaryState = undefined;
+				compactionInFlight = false;
+			}
 			state = recordProviderRequest(state, contextBudget(context).tokens);
 			save();
 		});
@@ -447,24 +459,29 @@ export function createOnlineContextCompactExtension(options: OnlineContextCompac
 			pendingBoundary = undefined;
 			selected = undefined;
 			activeDebt = undefined;
+			pendingBoundaryState = undefined;
 			state = recordCorrection(state);
 			save();
 			return { action: "continue" as const };
 		});
 
-		pi.on("turn_end", (event, context) => {
+		pi.on("turn_end", async (event, context) => {
 			const boundary = pendingBoundary;
 			pendingBoundary = undefined;
-			if (!boundary || selected) return;
-			const toolResult = event.toolResults.find((item) => item.toolCallId === boundary.toolCallId);
+			const requestedReset = resetRequested;
+			if (requestedReset) resetRequested = false;
+			if (!boundary && !requestedReset) return;
+			const toolResult = boundary === undefined
+				? undefined
+				: event.toolResults.find((item) => item.toolCallId === boundary.toolCallId);
 			if (
 				event.message.role !== "assistant" ||
 				event.message.stopReason === "error" ||
 				event.message.stopReason === "aborted" ||
 				context.signal?.aborted ||
-				!toolResult ||
-				toolResult.isError
+				(boundary !== undefined && (!toolResult || toolResult.isError))
 			) {
+				if (requestedReset) resetRequested = true;
 				return;
 			}
 
@@ -475,25 +492,115 @@ export function createOnlineContextCompactExtension(options: OnlineContextCompac
 				state.positiveContextDeltaCount === 0
 					? null
 					: state.positiveContextDeltaTotal / state.positiveContextDeltaCount;
-			const priced = decideCompaction({
-				writeTokens,
-				archiveTokens,
-				memoTokens: DEFAULT_NATIVE_SUMMARY_TOKEN_ESTIMATE,
-				contextTokens: writeTokens,
-				completedBoundaryRequestCounts: state.completedBoundaryRequestCounts,
-				remainingBoundaries: state.plan.filter((step) => step.status !== "completed").length,
-				averageContextTokenIncrement,
-				contextWindowTokens,
-				priorCompactionCount: state.nativeCompactionCount,
-				carriedDebtTokens: state.cacheDebtTokens,
-				cacheDebtRepaymentTokens: state.cacheDebtRepaymentTokens,
-				cacheWriteReadRatio,
-				economics: DEFAULT_COMPACTION_ECONOMICS,
-			});
+			const priced = boundary
+				? decideCompaction({
+					writeTokens,
+					archiveTokens,
+						memoTokens: DEFAULT_NATIVE_SUMMARY_TOKEN_ESTIMATE,
+					contextTokens: writeTokens,
+					completedBoundaryRequestCounts: state.completedBoundaryRequestCounts,
+					remainingBoundaries: state.plan.filter((step) => step.status !== "completed").length,
+					averageContextTokenIncrement,
+					contextWindowTokens,
+					priorCompactionCount: state.nativeCompactionCount,
+					carriedDebtTokens: state.cacheDebtTokens,
+					cacheDebtRepaymentTokens: state.cacheDebtRepaymentTokens,
+					cacheWriteReadRatio,
+					economics: DEFAULT_COMPACTION_ECONOMICS,
+				})
+				: {
+						writeTokens,
+						archiveTokens,
+						memoTokens: DEFAULT_NATIVE_SUMMARY_TOKEN_ESTIMATE,
+						contextTokens: writeTokens,
+						completedBoundaryRequestCounts: null,
+						requestsPerBoundaryMean: null,
+						requestsPerBoundaryLowerBound: null,
+						unboundedExpectedRemainingRequests: null,
+						averageContextTokenIncrement: null,
+						windowRequestUpperBound: null,
+						expectedRemainingRequests: null,
+						breakevenRequests: null,
+						combinedBreakevenRequests: null,
+						effectiveHorizonRequests: null,
+						cacheWriteReadRatio,
+						incrementalCacheCostRatio: null,
+						priorCompactionCount: state.nativeCompactionCount,
+						carriedDebtTokens: state.cacheDebtTokens,
+						cacheDebtRepaymentTokens: state.cacheDebtRepaymentTokens,
+						compact: false,
+						reason: "horizon_unavailable" as const,
+					};
 			const decision: CompactionDecision =
 				priced.compact && !nativeCompactionFeasible(context.sessionManager.getBranch(), keepRecentTokens)
 					? { ...priced, compact: false, reason: "native_not_compactable" }
 					: priced;
+			const structural = requestedReset ||
+				(decision.compact && selectCompactionMode({ plan: state.plan, progress: state.pendingProgress }) === "reset");
+			if (structural) {
+				const continuationFiles = recentChangedFiles(state.pendingProgress);
+				const windowNumber = nextWindowNumber();
+				const checkpoint: WindowResetInput = {
+					windowNumber,
+					plan: state.plan,
+					progress: state.pendingProgress,
+					notesIndex: await noteIndex(context),
+					directives: collectUserDirectives(context.sessionManager.getBranch()),
+					userReferences: collectUserReferences(context.sessionManager.getBranch()),
+				};
+				const reset: PendingReset = { windowNumber, checkpoint, fragment: formatWindowFragment(checkpoint) };
+				const writeTokens = requestedReset ? contextBudget(context).tokens : decision.writeTokens;
+				const archiveTokens = requestedReset
+					? Math.max(0, writeTokens - tokenEstimate(context.getSystemPrompt()) - keepRecentTokens)
+					: decision.archiveTokens;
+				const memoTokens = tokenEstimate(reset.fragment);
+				const nextState = recordCompaction(state, {
+					debtTokens: state.cacheDebtTokens + writeTokens * Math.max(0, (cacheWriteReadRatio ?? 1) - 1),
+					repaymentTokens: Math.max(0, archiveTokens - memoTokens),
+				});
+				const identity = windowIdentity(windowNumber);
+				const details = {
+					solPiWindow: {
+						version: 1,
+						mode: "reset",
+						windowNumber,
+						windowId: identity.windowId,
+						previousWindowId: identity.previousWindowId,
+						checkpoint,
+					},
+				};
+				try {
+					await appendWindowLedger(runtimeRoot(context), {
+						event: "reset",
+						reason: "manual",
+						windowNumber,
+						windowId: identity.windowId,
+						previousWindowId: identity.previousWindowId,
+						firstKeptEntryId: "retain-none",
+						tokensBefore: writeTokens,
+						fragmentBytes: Buffer.byteLength(reset.fragment, "utf8"),
+						at: new Date().toISOString(),
+					});
+				} catch (error) {
+					const reason = error instanceof Error ? error.message : String(error);
+					console.error(`[onlinecontextcompact] window ledger write failed: ${reason}`);
+				}
+				const removed = Math.max(0, archiveTokens - memoTokens);
+				if (removed > 0) showSolPiSavings(context, "Online Context Compact", formatSavingsCount(removed, "context tokens removed"));
+				const drafts: SessionBoundaryDraft[] = [
+					{ type: "compaction", summary: reset.fragment, firstKeptEntryId: null, details },
+					{
+						type: "custom_message",
+						customType: "sol-pi-online-context-compact",
+						content: formatPostCompactionContinuation(continuationFiles),
+						display: false,
+					},
+					{ type: "custom", customType: ONLINE_STATE_ENTRY, data: nextState },
+				];
+				pendingBoundaryState = nextState;
+				compactionInFlight = true;
+				return { entries: drafts, continue: true };
+			}
 			if (!decision.compact) return;
 
 			selected = { decision };
@@ -501,6 +608,12 @@ export function createOnlineContextCompactExtension(options: OnlineContextCompac
 		});
 
 		pi.on("agent_settled", async (_event, context) => {
+			if (pendingBoundaryState) {
+				state = restoreOnlineState(context.sessionManager.getBranch());
+				pendingBoundaryState = undefined;
+				compactionInFlight = false;
+				return;
+			}
 			const pending = selected;
 			selected = undefined;
 			const requestedReset = resetRequested;
@@ -610,6 +723,7 @@ export function createOnlineContextCompactExtension(options: OnlineContextCompac
 				compactionInFlight = false;
 				activeDebt = undefined;
 				pendingReset = undefined;
+				pendingBoundaryState = undefined;
 			}
 		});
 
@@ -657,12 +771,17 @@ export function createOnlineContextCompactExtension(options: OnlineContextCompac
 
 		pi.on("session_compact", (event, context) => {
 			ensureRestored(context);
-			state = recordCompaction(
-				state,
-				// fromExtension describes who supplied the summary, not who paid
-				// for the rebuild. Only our in-flight request owns activeDebt.
-				activeDebt ?? { debtTokens: state.cacheDebtTokens, repaymentTokens: 0 },
-			);
+			if (pendingBoundaryState) {
+				state = pendingBoundaryState;
+				pendingBoundaryState = undefined;
+			} else {
+				state = recordCompaction(
+					state,
+					// fromExtension describes who supplied the summary, not who paid
+					// for the rebuild. Only our in-flight request owns activeDebt.
+					activeDebt ?? { debtTokens: state.cacheDebtTokens, repaymentTokens: 0 },
+				);
+			}
 			save();
 			pendingBoundary = undefined;
 			selected = undefined;
@@ -679,6 +798,7 @@ export function createOnlineContextCompactExtension(options: OnlineContextCompac
 			selected = undefined;
 			activeDebt = undefined;
 			pendingReset = undefined;
+			pendingBoundaryState = undefined;
 			resetRequested = false;
 			compactionInFlight = false;
 		});

@@ -239,7 +239,7 @@ describe("windowed compaction wiring", () => {
 		await pi.emit("before_provider_request", { type: "before_provider_request", payload: {} }, context);
 		await runPlan(pi, context, "plan-open", { steps: OPEN });
 		await runPlan(pi, context, "plan-done", { steps: DONE, progress: PROGRESS });
-		await pi.emit(
+		const boundaryResult = await pi.emit(
 			"turn_end",
 			{
 				type: "turn_end",
@@ -258,24 +258,27 @@ describe("windowed compaction wiring", () => {
 			},
 			context,
 		);
-		expect(abort).toHaveBeenCalledOnce();
-
-		const settled = pi.emit("agent_settled", { type: "agent_settled" }, context);
-		await vi.waitFor(() => expect(beforeCompact).toBeDefined());
-		expect(compactOptions?.customInstructions).toBeDefined();
-
-		const result = beforeCompact as {
-			compaction?: { summary: string; firstKeptEntryId: string; tokensBefore: number; details?: unknown };
+		expect(abort).not.toHaveBeenCalled();
+		expect(compactOptions).toBeUndefined();
+		const result = boundaryResult as {
+			continue?: boolean;
+			entries?: Array<{ type: string; firstKeptEntryId?: string | null; summary?: string; details?: unknown }>;
 		};
-		expect(result.compaction?.firstKeptEntryId).toBe("kept-1");
-		expect(result.compaction?.tokensBefore).toBe(195_000);
-		expect(result.compaction?.summary.startsWith('<sol-pi-window id="w1" number="1" first="w0" previous="w0">')).toBe(true);
-		expect(result.compaction?.summary).toContain("- [completed] build: build it");
-		expect(result.compaction?.summary).toContain("Recorded progress:");
-		expect(result.compaction?.summary).toContain("src/a.ts");
-		expect(result.compaction?.details).toMatchObject({
+		expect(result.continue).toBe(true);
+		const compaction = result.entries?.find((entry) => entry.type === "compaction");
+		expect(compaction?.firstKeptEntryId).toBeNull();
+		expect(compaction?.summary?.startsWith('<sol-pi-window id="w1" number="1" first="w0" previous="w0">')).toBe(true);
+		expect(compaction?.summary).toContain("- [completed] build: build it");
+		expect(compaction?.summary).toContain("Recorded progress:");
+		expect(compaction?.summary).toContain("src/a.ts");
+		expect(compaction?.details).toMatchObject({
 			solPiWindow: { version: 1, mode: "reset", windowNumber: 1, windowId: "w1", previousWindowId: "w0" },
 		});
+		// In the real AgentSession the boundary drafts are committed before the
+		// next request. FakePi does not append drafts, so exercise the extension's
+		// corresponding request barrier explicitly before the later manual reset.
+		await pi.emit("before_provider_request", { type: "before_provider_request", payload: {} }, context);
+		const settled = pi.emit("agent_settled", { type: "agent_settled" }, context);
 
 		// A later manual compaction without a pending reset is never hijacked.
 		expect(
@@ -305,7 +308,7 @@ describe("windowed compaction wiring", () => {
 			windowNumber: 1,
 			windowId: "w1",
 			previousWindowId: "w0",
-			firstKeptEntryId: "kept-1",
+			firstKeptEntryId: "retain-none",
 			tokensBefore: 195_000,
 		});
 		expect(ledger[0]?.fragmentBytes).toBeGreaterThan(0);

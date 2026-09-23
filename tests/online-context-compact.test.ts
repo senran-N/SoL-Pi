@@ -126,7 +126,7 @@ describe("Online Context Compact extension", () => {
 		expect(await pi.emitContext(messages, context)).toEqual(messages);
 	});
 
-	it("stops at an eligible completed-step boundary, then compacts after settlement", async () => {
+	it("returns an atomic boundary for a structured window instead of compacting after settlement", async () => {
 		const manager = new FakeSessionManager();
 		manager.appendMessage({ role: "user", content: `old ${"x".repeat(2_000)}`, timestamp: Date.now() });
 		manager.appendMessage(assistant(`work ${"y".repeat(2_000)}`));
@@ -181,7 +181,7 @@ describe("Online Context Compact extension", () => {
 		await runPlan(pi, context, "plan-open", { steps: OPEN });
 		const planResult = await runPlan(pi, context, "plan-done", { steps: DONE, progress: PROGRESS });
 
-		await pi.emit(
+		const boundaryResult = await pi.emit(
 			"turn_end",
 			{
 				type: "turn_end",
@@ -202,33 +202,27 @@ describe("Online Context Compact extension", () => {
 		);
 
 		expect(planResult.details).toMatchObject({ boundary: true, progress_recorded: true });
-		expect(abort).toHaveBeenCalledOnce();
+		expect(abort).not.toHaveBeenCalled();
 		expect(compactCalls).toEqual([]);
+		expect(pi.sentMessages).toEqual([]);
 
-		const settlement = pi.emit("agent_settled", { type: "agent_settled" }, context);
-		await vi.waitFor(() => expect(compactCalls).toHaveLength(1));
-		expect(await pi.emit("session_before_tree", { type: "session_before_tree" }, context)).toEqual({ cancel: true });
-		finishCompaction();
-		await settlement;
+		const result = boundaryResult as {
+			entries?: Array<{ type: string; firstKeptEntryId?: string | null; customType?: string; content?: string; summary?: string }>;
+			continue?: boolean;
+		};
+		expect(result.continue).toBe(true);
+		const compaction = result.entries?.find((entry) => entry.type === "compaction");
+		const continuation = result.entries?.find((entry) => entry.type === "custom_message");
+		expect(compaction?.firstKeptEntryId).toBeNull();
+		expect(compaction?.summary).toContain("Recorded progress:");
+		expect(continuation).toMatchObject({
+			type: "custom_message",
+			customType: "sol-pi-online-context-compact",
+			content: formatPostCompactionContinuation(["src/a.ts"]),
+		});
 
-		expect(compactCalls).toHaveLength(1);
-		expect(compactCalls[0]?.customInstructions).toBe(BOUNDARY_COMPACTION_INSTRUCTIONS);
-		// sendMessage queues a deferred continuation in 0.87.0; the handler
-		// returns immediately without awaiting the continuation settlement.
-		expect(pi.sentMessages).toEqual([
-			{
-				message: {
-					customType: "sol-pi-online-context-compact",
-					// The recorded progress named src/a.ts, so the continuation carries it.
-					content: formatPostCompactionContinuation(["src/a.ts"]),
-					display: false,
-				},
-				options: { triggerTurn: true },
-			},
-		]);
-
+		await pi.emit("agent_settled", { type: "agent_settled" }, context);
 		expect(await pi.emit("session_before_tree", { type: "session_before_tree" }, context)).toBeUndefined();
-		expect(restoreOnlineState(manager.entries)).toMatchObject({ nativeCompactionCount: 1, pendingProgress: [] });
 	});
 });
 

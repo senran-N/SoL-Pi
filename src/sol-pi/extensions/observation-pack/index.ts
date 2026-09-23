@@ -18,7 +18,14 @@
  */
 
 import { join } from "node:path";
-import type { ExtensionAPI, ExtensionContext, ExtensionFactory } from "@earendil-works/pi-coding-agent";
+import type { AgentMessage } from "@earendil-works/pi-agent-core";
+import type {
+	ExtensionAPI,
+	ExtensionContext,
+	ExtensionFactory,
+	SessionBoundaryDraft,
+	SessionEntry,
+} from "@earendil-works/pi-coding-agent";
 import { Text } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
 import { runtimeRoot } from "../../runtime-paths.ts";
@@ -48,6 +55,48 @@ const RECALL_LIMITS = {
 	maxLines: RECALL_MAX_LINES - RECALL_HEADER_LINES,
 };
 
+type PendingContextEdit = {
+	readonly toolCallId: string;
+	readonly observationId: string;
+	readonly placeholder: string;
+};
+
+function findObservationTargetId(
+	entries: readonly SessionEntry[],
+	root: string,
+	candidate: PendingContextEdit,
+): string | undefined {
+	for (let index = entries.length - 1; index >= 0; index -= 1) {
+		const entry = entries[index];
+		if (entry?.type !== "message" || entry.message.role !== "toolResult") continue;
+		if (entry.message.toolCallId !== candidate.toolCallId) continue;
+		const observation = createObservation(entry.message, root);
+		if (observation?.id === candidate.observationId) return entry.id;
+	}
+	return undefined;
+}
+
+function findObservationTargetFromMessages(
+	entries: readonly SessionEntry[],
+	messages: readonly AgentMessage[],
+	root: string,
+	candidate: PendingContextEdit,
+): string | undefined {
+	const messageIndex = messages.findIndex(
+		(message) => message.role === "toolResult" && message.toolCallId === candidate.toolCallId,
+	);
+	if (messageIndex < 0) return undefined;
+	const projected = messages[messageIndex];
+	if (!projected || projected.role !== "toolResult") return undefined;
+	for (const entry of entries) {
+		if (entry.type !== "message" || entry.message.role !== "toolResult") continue;
+		if (entry.message.toolCallId !== projected.toolCallId) continue;
+		const observation = createObservation(entry.message, root);
+		if (observation?.id === candidate.observationId) return entry.id;
+	}
+	return undefined;
+}
+
 export function createObservationPackExtension(): ExtensionFactory {
 	return (pi: ExtensionAPI) => {
 		const countsByRoot = new Map<string, Promise<Map<string, number>>>();
@@ -64,6 +113,12 @@ export function createObservationPackExtension(): ExtensionFactory {
 			return counts;
 		};
 		const ledgers = new Map<string, Ledger>();
+		let pendingContextEdits: readonly PendingContextEdit[] = [];
+		let pendingContextRoot: string | undefined;
+		const clearPendingContextEdits = (): void => {
+			pendingContextEdits = [];
+			pendingContextRoot = undefined;
+		};
 		const ledgerFor = (ctx: ExtensionContext): Ledger => {
 			const root = runtimeRoot(ctx);
 			let ledger = ledgers.get(root);
@@ -147,8 +202,10 @@ export function createObservationPackExtension(): ExtensionFactory {
 		});
 
 		pi.on("context", async (event, ctx: ExtensionContext) => {
+			clearPendingContextEdits();
 			const projected = [...event.messages];
 			const root = runtimeRoot(ctx);
+			const edits: PendingContextEdit[] = [];
 			let sentCounts: Map<string, number> | undefined;
 			// How many provider requests each message has already been part of,
 			// counted by the assistant messages that follow it.
@@ -216,6 +273,7 @@ export function createObservationPackExtension(): ExtensionFactory {
 						);
 					}
 					projected[index] = { ...message, content: [{ type: "text", text: placeholder }] };
+					edits.push({ toolCallId: message.toolCallId, observationId: observation.id, placeholder });
 					sentCounts.set(observation.id, previousSends + 1);
 				} catch (error) {
 					// Fail open: a packing failure must never cost the agent its observation.
@@ -224,8 +282,51 @@ export function createObservationPackExtension(): ExtensionFactory {
 				}
 			}
 
+			pendingContextEdits = edits;
+			pendingContextRoot = root;
 			return { messages: projected };
 		});
+
+		pi.on("turn_end", (event, context) => {
+			const candidates = pendingContextEdits;
+			const candidateRoot = pendingContextRoot;
+			clearPendingContextEdits();
+			if (candidates.length === 0 || !candidateRoot) return;
+
+			let root: string;
+			try {
+				root = runtimeRoot(context);
+			} catch (error) {
+				const reason = error instanceof Error ? error.message : String(error);
+				console.error(`[observationpack] context edit fail-open: ${reason}`);
+				return;
+			}
+			if (root !== candidateRoot) return;
+			const entries: SessionBoundaryDraft[] = [...event.entries];
+			const branch = context.sessionManager.getBranch();
+			const editedTargets = new Set<string>(
+				branch.flatMap((entry) => entry.type === "context_edit" ? [entry.targetId] : []),
+			);
+			for (const entry of event.entries) {
+				if (entry.type === "context_edit") editedTargets.add(entry.targetId);
+			}
+			for (const candidate of candidates) {
+				const targetId = findObservationTargetId(branch, root, candidate) ??
+					findObservationTargetFromMessages(branch, event.context.contextMessages, root, candidate);
+				if (!targetId || editedTargets.has(targetId)) continue;
+				editedTargets.add(targetId);
+				entries.push({
+					type: "context_edit",
+					targetId,
+					replacement: { content: [{ type: "text", text: candidate.placeholder }] },
+				});
+			}
+			return entries.length === event.entries.length ? undefined : { entries };
+		});
+
+		pi.on("session_start", clearPendingContextEdits);
+		pi.on("session_tree", clearPendingContextEdits);
+		pi.on("session_shutdown", clearPendingContextEdits);
 	};
 }
 

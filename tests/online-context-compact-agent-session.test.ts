@@ -100,7 +100,9 @@ async function runCompactionScenario(requestedCompactions: 1 | 2): Promise<void>
 			compaction: { enabled: false, keepRecentTokens: 150, reserveTokens: 1_024 },
 			retry: { enabled: false },
 		});
-		const sessionManager = SessionManager.inMemory(cwd);
+		const sessionManager = SessionManager.create(cwd, join(cwd, "sessions"), {
+			id: `structured-${requestedCompactions}`,
+		});
 		sessionManager.appendMessage({
 			role: "user",
 			content: [{ type: "text", text: `historical request ${"x".repeat(6_000)}` }],
@@ -143,12 +145,9 @@ async function runCompactionScenario(requestedCompactions: 1 | 2): Promise<void>
 			source: "interactive",
 		});
 
-		expect(compactionRequests).toEqual(
-			Array.from({ length: requestedCompactions }, () => ({
-				customInstructions: BOUNDARY_COMPACTION_INSTRUCTIONS,
-				reason: "manual",
-			})),
-		);
+		// Structured windows use Pi 0.87's turn_end boundary drafts, so no
+		// summarization hook or provider request is needed for compaction.
+		expect(compactionRequests).toEqual([]);
 		const branch = sessionManager.getBranch();
 		expect(branch.filter((entry) => entry.type === "compaction")).toHaveLength(requestedCompactions);
 		expect(
@@ -161,9 +160,10 @@ async function runCompactionScenario(requestedCompactions: 1 | 2): Promise<void>
 					entry.display === false,
 			),
 		).toHaveLength(requestedCompactions);
+		expect(branch.filter((entry) => entry.type === "compaction").every((entry) => entry.firstKeptEntryId === entry.id)).toBe(true);
 		expect(faux.state.callCount).toBe(requestedCompactions * 2 + 1);
 		expect(session.getLastAssistantText()).toBe(finalReply);
-		expect(settledCount).toBe(requestedCompactions + 1);
+		expect(settledCount).toBe(1);
 		expect(session.isStreaming).toBe(false);
 		expect(session.isIdle).toBe(true);
 	} finally {
@@ -187,7 +187,7 @@ describe("Online Context Compact with a real AgentSession", () => {
 				await options?.onPayload?.({ model: model.id }, model);
 				return fauxAssistantMessage("corrected task acknowledged");
 			}]);
-			const sessionManager = SessionManager.inMemory(cwd);
+			const sessionManager = SessionManager.create(cwd, join(cwd, "sessions"), { id: "debt" });
 			sessionManager.appendCustomEntry(ONLINE_STATE_ENTRY, {
 				...initialOnlineState(), plan: OPEN, requestCount: 2, lastBoundaryRequestCount: 2,
 				completedBoundaryRequestCounts: [2], nativeCompactionCount: 1,
@@ -232,11 +232,11 @@ describe("Online Context Compact with a real AgentSession", () => {
 		}
 	}, 10_000);
 
-	it("settles the automatic continuation before the original prompt returns", async () => {
+	it("commits the structured window boundary before the original prompt returns", async () => {
 		await runCompactionScenario(1);
 	}, 10_000);
 
-	it("settles two consecutive automatic compactions before the original prompt returns", async () => {
+	it("commits two consecutive structured window boundaries before the original prompt returns", async () => {
 		await runCompactionScenario(2);
 	}, 10_000);
 });

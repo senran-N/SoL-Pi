@@ -68,14 +68,14 @@ The arXiv preprint is coming soon.
 
 - Node.js 22.19 or newer
 - npm
-- `@earendil-works/pi-coding-agent` 0.85.1
+- `@earendil-works/pi-coding-agent` 0.87.0
 
 ### Install
 
 Install the tested Pi release:
 
 ```bash
-npm install --global @earendil-works/pi-coding-agent@0.85.1
+npm install --global @earendil-works/pi-coding-agent@0.87.0
 ```
 
 Then install SoL-Pi directly from [NVlabs/SoL-Pi](https://github.com/NVlabs/SoL-Pi):
@@ -119,6 +119,8 @@ For the complete schema, see [Configuration](docs/configuration.md). Coding agen
 
 ## Storage and Security
 
+Observation Pack sends large text-only tool results in full for the first two provider requests, then uses a stable `obs_recall` placeholder. After the first placeholder projection, Pi 0.87's append-only `context_edit` boundary persists that replacement for the active branch without rewriting the raw session message; resume and native compaction therefore do not restore the large text. Image-bearing or mixed-content results remain under Pi's native image normalization and model input-limit handling.
+
 ObservationPack, Evidence-Preserving Reducer, and Scoped Exploration store session-specific archives under:
 
 ```text
@@ -158,7 +160,7 @@ npm audit --audit-level=high
 node scripts/check-pi-compat.mjs
 ```
 
-`npm run check` covers TypeScript, the complete test suite, and package inspection. The development dependency set is pinned to Pi 0.85.1; runtime Pi packages remain peer dependencies so Pi owns their installation and upgrades.
+`npm run check` covers TypeScript, the complete test suite, and package inspection. The development dependency set is pinned to Pi 0.87.0; runtime Pi packages remain peer dependencies so Pi owns their installation and upgrades.
 
 ## Project Status
 

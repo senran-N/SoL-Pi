@@ -231,7 +231,7 @@ describe("notes inside the window fragment", () => {
 		await pi.emit("before_provider_request", { type: "before_provider_request", payload: {} }, context);
 		await runPlan("plan-open", { steps: OPEN }, undefined, undefined, context);
 		await runPlan("plan-done", { steps: DONE, progress: PROGRESS }, undefined, undefined, context);
-		await pi.emit(
+		const boundaryResult = await pi.emit(
 			"turn_end",
 			{
 				type: "turn_end",
@@ -251,12 +251,12 @@ describe("notes inside the window fragment", () => {
 			context,
 		);
 		const settled = pi.emit("agent_settled", { type: "agent_settled" }, context);
-		await vi.waitFor(() => expect(beforeCompact).toBeDefined());
 
-		const result = beforeCompact as { compaction?: { summary: string } };
-		expect(result.compaction?.summary).toContain("Notes index:");
-		expect(result.compaction?.summary).toMatch(/- design-notes \(\d+ bytes\)/u);
-		expect(result.compaction?.summary).not.toContain("durable body");
+		const compaction = (boundaryResult as { entries?: Array<{ type: string; summary?: string; firstKeptEntryId?: string | null }> }).entries?.find((entry) => entry.type === "compaction");
+		expect(compaction?.firstKeptEntryId).toBeNull();
+		expect(compaction?.summary).toContain("Notes index:");
+		expect(compaction?.summary).toMatch(/- design-notes \(\d+ bytes\)/u);
+		expect(compaction?.summary).not.toContain("durable body");
 
 		await pi.emit("agent_settled", { type: "agent_settled" }, context);
 		await settled;
