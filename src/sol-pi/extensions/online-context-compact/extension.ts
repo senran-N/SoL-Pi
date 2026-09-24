@@ -698,8 +698,12 @@ export function createOnlineContextCompactExtension(options: OnlineContextCompac
 			}
 			if (!decision.compact) return;
 
+			// Defer native compaction until agent_settled. Calling context.abort() here
+			// marks the active run's AbortSignal, which other extensions (notably
+			// pi-goal-x) correctly interpret as a user cancellation. The compaction
+			// still starts from agent_settled, where Pi is idle and context.compact()
+			// can perform its own internal abort without cancelling the completed run.
 			selected = { decision };
-			context.abort();
 		});
 
 		pi.on("agent_settled", async (_event, context) => {

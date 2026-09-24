@@ -126,6 +126,57 @@ describe("Online Context Compact extension", () => {
 		expect(await pi.emitContext(messages, context)).toEqual(messages);
 	});
 
+	it("defers native priced compaction without aborting the completed run", async () => {
+		const manager = new FakeSessionManager();
+		manager.appendMessage({ role: "user", content: `old ${"x".repeat(2_000)}`, timestamp: Date.now() });
+		manager.appendMessage(assistant(`work ${"y".repeat(2_000)}`));
+		const pi = new FakePi(manager);
+		createOnlineContextCompactExtension({ cacheWriteReadRatio: 12.5, keepRecentTokens: 1 })(pi.asExtensionApi());
+		const abort = vi.fn();
+		const compactCalls: CompactOptions[] = [];
+		let context: ExtensionContext;
+		const compact = (options: CompactOptions = {}): void => {
+			compactCalls.push(options);
+			void options.onComplete?.({
+				summary: "native summary",
+				firstKeptEntryId: manager.entries.at(-1)?.id ?? "message-1",
+				tokensBefore: 195_000,
+			});
+		};
+		context = fakeContext(manager, {
+			abort,
+			compact,
+			isIdle: () => true,
+			getSystemPrompt: () => "test prompt",
+			getContextUsage: () => ({ tokens: 195_000, contextWindow: 200_000, percent: 97.5 }),
+		});
+
+		await pi.emit("session_start", { type: "session_start" }, context);
+		await pi.emitContext(buildSessionMessages(), context);
+		await pi.emit("before_provider_request", { type: "before_provider_request", payload: {} }, context);
+		await runPlan(pi, context, "plan-open", { steps: OPEN });
+		const planResult = await runPlan(pi, context, "plan-done", { steps: DONE });
+		const boundaryResult = await pi.emit(
+			"turn_end",
+			{
+				type: "turn_end",
+				turnIndex: 1,
+				message: assistant("boundary"),
+				toolResults: [{ role: "toolResult", toolCallId: "plan-done", toolName: "update_plan", content: [{ type: "text", text: "done" }], isError: false, timestamp: Date.now() }],
+			},
+			context,
+		);
+
+		expect(planResult.details).toMatchObject({ boundary: true, progress_recorded: false });
+		expect(boundaryResult).toBeUndefined();
+		expect(abort).not.toHaveBeenCalled();
+		expect(compactCalls).toEqual([]);
+
+		await pi.emit("agent_settled", { type: "agent_settled" }, context);
+		expect(abort).not.toHaveBeenCalled();
+		expect(compactCalls).toHaveLength(1);
+	});
+
 	it("returns an atomic boundary for a structured window instead of compacting after settlement", async () => {
 		const manager = new FakeSessionManager();
 		manager.appendMessage({ role: "user", content: `old ${"x".repeat(2_000)}`, timestamp: Date.now() });
