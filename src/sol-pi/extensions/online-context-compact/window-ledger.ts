@@ -11,10 +11,15 @@
  */
 import { appendFile, mkdir } from "node:fs/promises";
 import { dirname, join } from "node:path";
+import type { CompactionDecision, CompactionReason } from "./economics.ts";
 
 export type WindowLedgerRecord = {
+	readonly transitionId: string;
+	readonly stage: "decision" | "commit" | "outcome";
 	readonly event: "reset" | "summary";
-	readonly reason: "manual" | "threshold" | "overflow";
+	readonly reason: "manual" | "threshold" | "overflow" | CompactionReason;
+	readonly outcome?: "deferred" | "committed" | "rejected" | "aborted" | "failed" | "noop";
+	readonly decision?: CompactionDecision;
 	readonly windowNumber: number;
 	readonly windowId: string;
 	readonly previousWindowId: string | null;
@@ -31,5 +36,5 @@ export function windowLedgerPath(root: string): string {
 export async function appendWindowLedger(root: string, record: WindowLedgerRecord): Promise<void> {
 	const path = windowLedgerPath(root);
 	await mkdir(dirname(path), { recursive: true });
-	await appendFile(path, `${JSON.stringify(record)}\n`, "utf8");
+	await appendFile(path, `\n${JSON.stringify(record)}\n`, "utf8");
 }

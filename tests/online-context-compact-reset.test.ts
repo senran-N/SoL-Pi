@@ -303,7 +303,8 @@ describe("new_context", () => {
 		const ledger = readFileSync(windowLedgerPath(sessionRoot(root)), "utf8")
 			.trim()
 			.split("\n")
-			.map((line) => JSON.parse(line) as Record<string, unknown>);
+			.filter(Boolean).map((line) => JSON.parse(line) as Record<string, unknown>)
+			.filter((record) => record.stage === "commit");
 		expect(ledger).toHaveLength(1);
 		expect(ledger[0]).toMatchObject({ event: "reset", reason: "manual", windowNumber: 1, windowId: "w1" });
 		expect(ledger[0]?.fragmentBytes).toBeGreaterThan(0);
@@ -503,7 +504,8 @@ describe("new_context", () => {
 		const ledger = readFileSync(windowLedgerPath(sessionRoot(root)), "utf8")
 			.trim()
 			.split("\n")
-			.map((line) => JSON.parse(line) as Record<string, unknown>);
+			.filter(Boolean).map((line) => JSON.parse(line) as Record<string, unknown>)
+			.filter((record) => record.stage === "commit");
 		expect(ledger.map((record) => record.windowId)).toEqual(["w1", "w2"]);
 		expect(ledger.map((record) => record.previousWindowId)).toEqual(["w0", "w1"]);
 	});

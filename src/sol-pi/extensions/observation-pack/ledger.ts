@@ -21,8 +21,10 @@ export type Ledger = (entry: Record<string, unknown>) => Promise<void>;
  * those rows, while a placeholder row alone proves the allowance was consumed.
  * These are projection attempts, not proof of provider delivery or cache hits.
  */
-export async function readSendCounts(path: string): Promise<Map<string, number>> {
+export async function readProjectionLedger(path: string): Promise<{ counts: Map<string, number>; packed: Set<string>; firstPass: Set<string> }> {
 	const counts = new Map<string, number>();
+	const packed = new Set<string>();
+	const firstPass = new Set<string>();
 	const stream = createReadStream(path, { encoding: "utf8" });
 	const lines = createInterface({ input: stream, crlfDelay: Infinity });
 	let invalidRows = 0;
@@ -41,6 +43,10 @@ export async function readSendCounts(path: string): Promise<Map<string, number>>
 				continue;
 			}
 			const previous = counts.get(entry.id) ?? 0;
+			if (entry.event === "placeholder") {
+				packed.add(entry.id);
+				if (entry.firstPass === true) firstPass.add(entry.id);
+			}
 			const count = entry.sendNumber as number | undefined;
 			counts.set(entry.id, Math.max(previous, count ?? (entry.event === "full" ? previous + 1 : 0),
 				entry.event === "placeholder" ? FULL_SENDS + 1 : 0));
@@ -52,7 +58,11 @@ export async function readSendCounts(path: string): Promise<Map<string, number>>
 		stream.destroy();
 	}
 	if (invalidRows > 0) console.error(`[observationpack] ignored ${invalidRows} invalid ledger rows while restoring send counts`);
-	return counts;
+	return { counts, packed, firstPass };
+}
+
+export async function readSendCounts(path: string): Promise<Map<string, number>> {
+	return (await readProjectionLedger(path)).counts;
 }
 
 export function createLedger(path: string): Ledger {

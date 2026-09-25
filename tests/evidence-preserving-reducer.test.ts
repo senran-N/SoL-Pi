@@ -303,7 +303,7 @@ describe("evidence-preserving reducer", () => {
 		expect(events.filter((entry) => entry.kind === "applied")).toHaveLength(1);
 		expect(notify).toHaveBeenCalledTimes(1);
 		expect(notify.mock.calls[0]?.[0]).toMatch(
-			/^⚡ SoL-Pi · Luna Delegating\nMoney saved · .+ removed from future prompts$/u,
+			/^⚡ SoL-Pi · Luna Delegating\nEfficiency · .+ removed from future prompts$/u,
 		);
 	});
 
@@ -631,6 +631,7 @@ describe("evidence-preserving reducer", () => {
 					: entry.reason === "unverifiable-quote",
 			),
 		).toBe(true);
+		expect(JSON.stringify(manager.customEntryData())).not.toContain("model call failed");
 	});
 
 	it("fails open when Pi cannot complete the nested model call", async () => {

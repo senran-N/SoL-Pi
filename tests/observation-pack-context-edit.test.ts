@@ -45,7 +45,7 @@ function largeResult(toolCallId = "call-1"): ToolResultMessage {
 
 function extension(): FakePi {
 	const pi = new FakePi();
-	createObservationPackExtension()(pi.asExtensionApi());
+	createObservationPackExtension({ cacheWriteReadRatio: 0 })(pi.asExtensionApi());
 	return pi;
 }
 
@@ -142,7 +142,7 @@ describe("Observation Pack durable context edits", () => {
 			]);
 			const extension: ExtensionFactory = (pi) => {
 				pi.registerProvider(faux.provider);
-				createObservationPackExtension()(pi);
+				createObservationPackExtension({ cacheWriteReadRatio: 0 })(pi);
 				pi.registerTool({
 					name: "large_output",
 					label: "Large Output",

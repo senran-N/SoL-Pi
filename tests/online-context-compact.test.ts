@@ -85,6 +85,7 @@ describe("Online Context Compact extension", () => {
 			"session_before_compact",
 			"session_before_tree",
 			"session_compact",
+			"session_compact_failed",
 			"session_shutdown",
 			"session_start",
 			"session_tree",
@@ -131,7 +132,7 @@ describe("Online Context Compact extension", () => {
 		manager.appendMessage({ role: "user", content: `old ${"x".repeat(2_000)}`, timestamp: Date.now() });
 		manager.appendMessage(assistant(`work ${"y".repeat(2_000)}`));
 		const pi = new FakePi(manager);
-		createOnlineContextCompactExtension({ cacheWriteReadRatio: 12.5, keepRecentTokens: 1 })(pi.asExtensionApi());
+		createOnlineContextCompactExtension({ cacheWriteReadRatio: 0, keepRecentTokens: 1 })(pi.asExtensionApi());
 		const abort = vi.fn();
 		const compactCalls: CompactOptions[] = [];
 		let context: ExtensionContext;
@@ -148,7 +149,7 @@ describe("Online Context Compact extension", () => {
 			compact,
 			isIdle: () => true,
 			getSystemPrompt: () => "test prompt",
-			getContextUsage: () => ({ tokens: 195_000, contextWindow: 200_000, percent: 97.5 }),
+			getContextUsage: () => ({ tokens: 50_000, contextWindow: 200_000, percent: 25 }),
 		});
 
 		await pi.emit("session_start", { type: "session_start" }, context);

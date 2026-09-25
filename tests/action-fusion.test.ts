@@ -142,10 +142,10 @@ describe("action fusion then_run", () => {
 		} as never);
 
 		expect(componentText(fused)).toContain("⚡ SoL-Pi · Action Fusion");
-		expect(componentText(fused)).toContain("Money saved · 1 model round-trip avoided");
+		expect(componentText(fused)).toContain("Efficiency · 1 model round-trip avoided");
 		// A normal path or its OSC 8 hyperlink may contain the repository name.
 		expect(componentText(plain)).not.toContain("⚡ SoL-Pi · Action Fusion");
-		expect(componentText(plain)).not.toContain("Money saved · 1 model round-trip avoided");
+		expect(componentText(plain)).not.toContain("Efficiency · 1 model round-trip avoided");
 	});
 
 	it("runs write then_run through bash after the written content is visible", async () => {
@@ -224,7 +224,7 @@ describe("action fusion then_run", () => {
 		);
 
 		expect(notify).toHaveBeenCalledWith(
-			"⚡ SoL-Pi · Action Fusion\nMoney saved · 1 model round-trip avoided",
+			"⚡ SoL-Pi · Action Fusion\nEfficiency · 1 model round-trip avoided",
 			"info",
 		);
 	});

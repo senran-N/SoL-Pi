@@ -62,6 +62,9 @@ export type WindowResetInput = {
 	readonly directives?: UserDirectives;
 	/** Full branch user messages with source ids, persisted in compaction details. */
 	readonly userReferences?: readonly UserReference[];
+	/** Bounded local index; history_read returns the original evidence on demand. */
+	readonly recentHistory?: readonly { readonly id: string; readonly kind: string; readonly preview: string }[];
+	readonly pendingCommands?: readonly { readonly handle: string; readonly sourceId: string; readonly lastKnownStatus: string }[];
 };
 
 export type WindowModeInput = {
@@ -111,8 +114,12 @@ export function formatWindowFragment(input: WindowResetInput): string {
 	const close = `</${WINDOW_TAG}>`;
 
 	const recovery = input.userReferences === undefined ? "" :
-		`\nFull checkpoint: history_read id="checkpoint-w${input.windowNumber}". Read it before acting; follow next_offset to recover omitted state and all ${input.userReferences.length} user instructions (source ids included).`;
-	return renderFragment(open, close, sanitize(WINDOW_CONTINUITY_INSTRUCTION) + recovery, [
+		`\nFull checkpoint: history_read id="checkpoint-w${input.windowNumber}". Read it before acting; follow next_offset to recover omitted state and all ${input.userReferences.length} user instructions (source ids included).` +
+		(input.recentHistory?.length ? " Then read the recentHistory source ids needed for the current step; previews are only an index, not complete evidence." : "");
+	const commands = input.pendingCommands?.length
+		? "\nCheckpoint pendingCommands lists commands last seen running or with unread output. Verify current status with exec_list before starting duplicates; history is not proof of a live process."
+		: "";
+	return renderFragment(open, close, sanitize(WINDOW_CONTINUITY_INSTRUCTION) + recovery + commands, [
 		{ lines: directiveLines(input.directives), reservedBytes: 0 },
 		{ lines: planLines(input.plan), reservedBytes: PLAN_RESERVED_BYTES },
 		{ lines: progressLines(input.progress), reservedBytes: PROGRESS_RESERVED_BYTES },

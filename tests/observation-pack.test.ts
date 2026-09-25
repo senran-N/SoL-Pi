@@ -42,7 +42,7 @@ async function sessionRoot(): Promise<string> {
 
 function observationPackPi(): FakePi {
 	const pi = new FakePi();
-	createObservationPackExtension()(pi.asExtensionApi());
+	createObservationPackExtension({ cacheWriteReadRatio: 0 })(pi.asExtensionApi());
 	return pi;
 }
 
@@ -104,7 +104,7 @@ describe("observation pack", () => {
 	it("registers its public surface without legacy environment flags", () => {
 		const pi = observationPackPi();
 		expect(pi.handlers.has("context")).toBe(true);
-		expect(pi.registeredTools.map((tool) => tool.name)).toEqual(["obs_recall"]);
+		expect(pi.registeredTools.map((tool) => tool.name)).toEqual(["obs_search", "obs_recall"]);
 	});
 
 	it("renders observation recall as an English lightning savings call", () => {
@@ -113,7 +113,7 @@ describe("observation pack", () => {
 		const rendered = recall.renderCall!(args, plainTheme, { args, cwd: process.cwd() } as never);
 
 		expect(componentText(rendered)).toContain("⚡ SoL-Pi · Observation Pack");
-		expect(componentText(rendered)).toContain("Money saved");
+		expect(componentText(rendered)).toContain("Efficiency");
 	});
 
 	it("keeps the first two requests full and reuses one stable placeholder afterwards", async () => {
@@ -158,7 +158,7 @@ describe("observation pack", () => {
 
 		expect(notify).toHaveBeenCalledTimes(1);
 		expect(notify.mock.calls[0]?.[0]).toMatch(
-			/^⚡ SoL-Pi · Observation Pack\nMoney saved · [\d,]+ context tokens avoided$/u,
+			/^⚡ SoL-Pi · Observation Pack\nEfficiency · [\d,]+ estimated context tokens avoided$/u,
 		);
 	});
 

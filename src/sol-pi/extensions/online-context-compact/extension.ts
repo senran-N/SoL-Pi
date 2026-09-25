@@ -3,6 +3,7 @@
  * SPDX-License-Identifier: MIT
  */
 import type { AgentMessage, AgentToolResult } from "@earendil-works/pi-agent-core";
+import { randomUUID } from "node:crypto";
 import {
 	buildSessionContext,
 	buildSessionProjection,
@@ -18,6 +19,7 @@ import { runtimeRoot } from "../../runtime-paths.ts";
 import {
 	DEFAULT_COMPACTION_ECONOMICS,
 	decideCompaction,
+	isWindowPressure,
 	type CompactionDecision,
 } from "./economics.ts";
 import { collectUserDirectives, collectUserReferences } from "./directives.ts";
@@ -36,14 +38,15 @@ import {
 } from "./state.ts";
 import {
 	HISTORY_DEFAULT_LIMIT,
-	HISTORY_MAX_LIMIT,
 	readHistoryEntry,
+	recentHistoryReferences,
+	pendingCommandReferences,
 	searchHistory,
 } from "./history.ts";
-import { appendNote, listNotes, readNote, readNotesIndex, writeNote } from "./notes.ts";
+import { branchNoteIndex, branchNotes, createNoteVersion, NOTE_VERSION_ENTRY, readNote, storeNoteVersion } from "./notes.ts";
 import { registerOnlineTools, type PlanUpdateInput } from "./tools.ts";
 import { formatWindowFragment, selectCompactionMode, windowIdentity, type WindowResetInput } from "./window.ts";
-import { appendWindowLedger } from "./window-ledger.ts";
+import { appendWindowLedger, type WindowLedgerRecord } from "./window-ledger.ts";
 
 export const DEFAULT_KEEP_RECENT_TOKENS = 20_000;
 export const DEFAULT_NATIVE_SUMMARY_TOKEN_ESTIMATE = 1_000;
@@ -65,6 +68,7 @@ type PendingBoundary = { readonly toolCallId: string };
 type SelectedCompaction = { readonly decision: CompactionDecision };
 type CacheDebt = { readonly debtTokens: number; readonly repaymentTokens: number };
 type PendingReset = { readonly windowNumber: number; readonly fragment: string; readonly checkpoint: WindowResetInput };
+type PendingAudit = { readonly record: WindowLedgerRecord; readonly removedTokens: number };
 
 export function resolveKeepRecentTokens(value: number | undefined): number {
 	const resolved = value ?? DEFAULT_KEEP_RECENT_TOKENS;
@@ -201,7 +205,7 @@ function isProjectedTurnStart(message: AgentMessage): boolean {
  * Mirror the public projection's cut-point rules here so OCC doesn't schedule
  * a compaction that AgentSession.compact will reject as "Nothing to compact".
  */
-function nativeCompactionFeasible(entries: readonly SessionEntry[], keepRecentTokens: number): boolean {
+function nativeCompactionCut(entries: readonly SessionEntry[], keepRecentTokens: number): string | undefined {
 	const path = branchAfterAbort(entries);
 	const projection = buildSessionProjection([...path]);
 	const projectedEntries = projection.entries;
@@ -267,6 +271,13 @@ function nativeCompactionFeasible(entries: readonly SessionEntry[], keepRecentTo
 		}
 	}
 
+	// A synthetic abort marker is only a feasibility aid. Never retain that
+	// nonexistent id or drop the newest assistant/tool-result group with it.
+	if (projectedEntries[firstKeptEntryIndex]?.sourceEntry.id === "sol-pi-online-context-compact-abort-marker") {
+		const previousCut = cutPoints.filter((index) => index < firstKeptEntryIndex).at(-1);
+		if (previousCut === undefined) return;
+		firstKeptEntryIndex = previousCut;
+	}
 	const firstKept = projectedEntries[firstKeptEntryIndex];
 	const startsTurn = firstKept !== undefined &&
 		firstKept.sourceEntry.type !== "compaction" && firstKept.messages.some(isProjectedTurnStart);
@@ -290,7 +301,12 @@ function nativeCompactionFeasible(entries: readonly SessionEntry[], keepRecentTo
 				.slice(turnStartIndex, firstKeptEntryIndex)
 				.flatMap((entry) => entry.sourceEntry.type === "compaction" ? [] : entry.messages.filter((message) => message.role !== "system"))
 		: [];
-	return historyMessages.length > 0 || prefixMessages.length > 0;
+	return (historyMessages.length > 0 || prefixMessages.length > 0) && firstKept &&
+		firstKept.sourceEntry.id !== "sol-pi-online-context-compact-abort-marker" ? firstKept.sourceEntry.id : undefined;
+}
+
+function nativeCompactionFeasible(entries: readonly SessionEntry[], keepRecentTokens: number): boolean {
+	return nativeCompactionCut(entries, keepRecentTokens) !== undefined;
 }
 
 function validPositiveInteger(value: unknown): value is number {
@@ -318,6 +334,21 @@ export function createOnlineContextCompactExtension(options: OnlineContextCompac
 		// restore the last committed state from the session branch instead.
 		let pendingBoundaryState: OnlineState | undefined;
 		let compactionInFlight = false;
+		let pendingAudit: PendingAudit | undefined;
+		let lastTurnFailed = false;
+		const audit = async (context: ExtensionContext, record: WindowLedgerRecord): Promise<void> => {
+			try { await appendWindowLedger(runtimeRoot(context), { ...record, at: new Date().toISOString() }); }
+			catch (error) { console.error(`[onlinecontextcompact] window ledger write failed: ${error instanceof Error ? error.message : String(error)}`); }
+		};
+		const finishAudit = async (context: ExtensionContext, outcome: NonNullable<WindowLedgerRecord["outcome"]>): Promise<void> => {
+			const pending = pendingAudit;
+			pendingAudit = undefined;
+			if (!pending) return;
+			await audit(context, { ...pending.record, stage: outcome === "committed" ? "commit" : "outcome", outcome });
+			if (outcome === "committed" && pending.removedTokens > 0) {
+				showSolPiSavings(context, "Online Context Compact", formatSavingsCount(pending.removedTokens, "context tokens removed"));
+			}
+		};
 
 		const restore = (context: ExtensionContext): void => {
 			state = restoreOnlineState(context.sessionManager.getBranch());
@@ -333,6 +364,8 @@ export function createOnlineContextCompactExtension(options: OnlineContextCompac
 			pendingBoundaryState = undefined;
 			resetRequested = false;
 			compactionInFlight = false;
+			pendingAudit = undefined;
+			lastTurnFailed = false;
 		};
 		const ensureRestored = (context: ExtensionContext): void => {
 			if (!restored) restore(context);
@@ -345,13 +378,8 @@ export function createOnlineContextCompactExtension(options: OnlineContextCompac
 		const nextWindowNumber = (): number => state.nativeCompactionCount + 1;
 		// The window fragment may only carry a short note index; a missing or
 		// unreadable notes directory degrades to "no notes" rather than failing.
-		const noteIndex = async (context: ExtensionContext): Promise<readonly string[]> => {
-			try {
-				return await readNotesIndex(runtimeRoot(context));
-			} catch {
-				return [];
-			}
-		};
+		const noteIndex = async (context: ExtensionContext): Promise<readonly string[]> =>
+			branchNoteIndex(context.sessionManager.getBranch());
 		// Report and act on one budget snapshot. Pi may have no usage just after a
 		// reset, or its estimate may be smaller than the current projected context.
 		const contextBudget = (context: ExtensionContext) => {
@@ -400,7 +428,9 @@ export function createOnlineContextCompactExtension(options: OnlineContextCompac
 			noteWrite: async (input) => {
 				ensureRestored(input.context);
 				if (input.signal?.aborted) throw new Error("Note write was aborted");
-				const entry = await writeNote(runtimeRoot(input.context), input.slug, input.body);
+				const entry = await createNoteVersion(runtimeRoot(input.context), input.slug, input.body);
+				input.signal?.throwIfAborted();
+				pi.appendEntry(NOTE_VERSION_ENTRY, entry);
 				return result(`Recorded note "${entry.slug}" (${entry.bytes} bytes).`, {
 					op: "write",
 					slug: entry.slug,
@@ -411,7 +441,11 @@ export function createOnlineContextCompactExtension(options: OnlineContextCompac
 			noteAppend: async (input) => {
 				ensureRestored(input.context);
 				if (input.signal?.aborted) throw new Error("Note append was aborted");
-				const entry = await appendNote(runtimeRoot(input.context), input.slug, input.body);
+				const existing = branchNotes(input.context.sessionManager.getBranch()).get(input.slug);
+				const entry = await createNoteVersion(runtimeRoot(input.context), input.slug,
+					`${existing?.body ?? ""}${input.body}`);
+				input.signal?.throwIfAborted();
+				pi.appendEntry(NOTE_VERSION_ENTRY, entry);
 				return result(`Appended to note "${entry.slug}" (now ${entry.bytes} bytes).`, {
 					op: "append",
 					slug: entry.slug,
@@ -423,18 +457,33 @@ export function createOnlineContextCompactExtension(options: OnlineContextCompac
 				ensureRestored(input.context);
 				if (input.signal?.aborted) throw new Error("Note read was aborted");
 				const root = runtimeRoot(input.context);
-				const text = await readNote(root, input.slug);
-				if (text === undefined) {
-					const available = (await listNotes(root)).map((entry) => entry.slug);
+				let version = branchNotes(input.context.sessionManager.getBranch()).get(input.slug);
+				if (!version && input.importLegacy) {
+					const legacy = await readNote(root, input.slug);
+					if (legacy !== undefined) {
+						version = await createNoteVersion(root, input.slug, legacy, true);
+						input.signal?.throwIfAborted();
+						pi.appendEntry(NOTE_VERSION_ENTRY, version);
+					}
+				}
+				if (!version) {
+					const available = [...branchNotes(input.context.sessionManager.getBranch()).keys()];
 					throw new Error(
-						`No note named "${input.slug}". Available notes: ${available.length > 0 ? available.join(", ") : "(none)"}.`,
+						`No note named "${input.slug}" on this branch. Available notes: ${available.length > 0 ? available.join(", ") : "(none)"}. ` +
+						"Legacy on-disk notes require explicit import_legacy=true.",
 					);
 				}
-				return result(text, {
+				// Forks carry immutable references and recovery bodies in session entries.
+				// Rebuild their object in this session's own runtime directory on demand.
+				await storeNoteVersion(root, version);
+				input.signal?.throwIfAborted();
+				return result(version.body, {
 					op: "read",
 					slug: input.slug,
 					found: true,
-					bytes: Buffer.byteLength(text, "utf8"),
+					bytes: version.bytes,
+					content_hash: version.contentHash,
+					imported_legacy: version.importedLegacy === true,
 				});
 			},
 			newContext: async (input) => {
@@ -483,7 +532,9 @@ export function createOnlineContextCompactExtension(options: OnlineContextCompac
 				// user forked or rewound away from.
 				const entries = input.context.sessionManager.getBranch();
 				const limit = input.limit ?? HISTORY_DEFAULT_LIMIT;
-				const search = searchHistory(entries, input.query, limit);
+				const search = searchHistory(entries, input.query, limit, {
+					cursor: input.cursor, role: input.role, tool: input.tool, after: input.after, before: input.before, source: input.source,
+				});
 				if (search.total === 0) {
 					return result(`No recorded history matches "${input.query}".`, {
 						op: "history_search",
@@ -496,15 +547,17 @@ export function createOnlineContextCompactExtension(options: OnlineContextCompac
 					(hit) => `- ${hit.id} [${hit.kind}] #${hit.index}: ${hit.snippet}`,
 				);
 				const note = search.truncated
-					? ` (showing ${search.hits.length} of ${search.total}; narrow the query or raise limit up to ${HISTORY_MAX_LIMIT})`
+					? ` (showing ${search.hits.length} of ${search.total}; follow next_cursor with the same query and filters)`
 					: "";
 				return result(
-					`${search.total} matches for "${input.query}"${note}:\n${lines.join("\n")}\nRead one with history_read id.`,
+					`${search.total} matches for "${input.query}"${note}:\n${lines.join("\n")}\nRead one with history_read id.` +
+						(search.nextCursor ? `\nnext_cursor: ${search.nextCursor}` : ""),
 					{
 						op: "history_search",
 						query: input.query,
 						total: search.total,
-						hits: search.hits.map((hit) => ({ id: hit.id, index: hit.index, kind: hit.kind })),
+						hits: search.hits.map((hit) => ({ id: hit.id, index: hit.index, kind: hit.kind, source: hit.source, timestamp: hit.timestamp, tool: hit.tool })),
+						next_cursor: search.nextCursor,
 					},
 				);
 			},
@@ -535,37 +588,50 @@ export function createOnlineContextCompactExtension(options: OnlineContextCompac
 			observedMessages = [...event.messages];
 		});
 
-		pi.on("before_provider_request", (_event, context) => {
+		pi.on("before_provider_request", async (_event, context) => {
 			ensureRestored(context);
 			if (pendingBoundaryState) {
 				state = pendingBoundaryState;
 				pendingBoundaryState = undefined;
 				compactionInFlight = false;
+				await finishAudit(context, "committed");
 			}
 			state = recordProviderRequest(state, contextBudget(context).tokens);
 			save();
 		});
 
-		pi.on("input", (event, context) => {
+		pi.on("input", async (event, context) => {
 			if (event.streamingBehavior !== "steer" && !event.text.startsWith("CORRECTION:")) {
 				return { action: "continue" as const };
 			}
 			ensureRestored(context);
+			await finishAudit(context, "aborted");
 			pendingBoundary = undefined;
 			selected = undefined;
 			activeDebt = undefined;
 			pendingBoundaryState = undefined;
+			resetRequested = false;
 			state = recordCorrection(state);
 			save();
 			return { action: "continue" as const };
 		});
 
 		pi.on("turn_end", async (event, context) => {
+			ensureRestored(context);
 			const boundary = pendingBoundary;
 			pendingBoundary = undefined;
 			const requestedReset = resetRequested;
 			if (requestedReset) resetRequested = false;
-			if (!boundary && !requestedReset) return;
+			lastTurnFailed = event.message.role !== "assistant" || event.message.stopReason === "error" ||
+				event.message.stopReason === "aborted" || context.signal?.aborted === true || event.toolResults.some((item) => item.isError);
+			if (lastTurnFailed) {
+				selected = undefined;
+				resetRequested = false;
+				await finishAudit(context, "aborted");
+				return;
+			}
+			const budget = contextBudget(context);
+			if (!boundary && !requestedReset && !isWindowPressure(budget.tokens, budget.window)) return;
 			const toolResult = boundary === undefined
 				? undefined
 				: event.toolResults.find((item) => item.toolCallId === boundary.toolCallId);
@@ -576,24 +642,23 @@ export function createOnlineContextCompactExtension(options: OnlineContextCompac
 				context.signal?.aborted ||
 				(boundary !== undefined && (!toolResult || toolResult.isError))
 			) {
-				if (requestedReset) resetRequested = true;
+				resetRequested = false;
 				return;
 			}
 
-			const { tokens: writeTokens, window: contextWindowTokens } = contextBudget(context);
+			const { tokens: writeTokens, window: contextWindowTokens } = budget;
 			const fixedTokens = tokenEstimate(context.getSystemPrompt());
 			const archiveTokens = Math.max(0, writeTokens - fixedTokens - keepRecentTokens);
 			const averageContextTokenIncrement =
 				state.positiveContextDeltaCount === 0
 					? null
 					: state.positiveContextDeltaTotal / state.positiveContextDeltaCount;
-			const priced = boundary
-				? decideCompaction({
+			const priced = decideCompaction({
 					writeTokens,
 					archiveTokens,
 						memoTokens: DEFAULT_NATIVE_SUMMARY_TOKEN_ESTIMATE,
 					contextTokens: writeTokens,
-					completedBoundaryRequestCounts: state.completedBoundaryRequestCounts,
+					completedBoundaryRequestCounts: boundary ? state.completedBoundaryRequestCounts : null,
 					remainingBoundaries: state.plan.filter((step) => step.status !== "completed").length,
 					averageContextTokenIncrement,
 					contextWindowTokens,
@@ -602,36 +667,33 @@ export function createOnlineContextCompactExtension(options: OnlineContextCompac
 					cacheDebtRepaymentTokens: state.cacheDebtRepaymentTokens,
 					cacheWriteReadRatio,
 					economics: DEFAULT_COMPACTION_ECONOMICS,
-				})
-				: {
-						writeTokens,
-						archiveTokens,
-						memoTokens: DEFAULT_NATIVE_SUMMARY_TOKEN_ESTIMATE,
-						contextTokens: writeTokens,
-						completedBoundaryRequestCounts: null,
-						requestsPerBoundaryMean: null,
-						requestsPerBoundaryLowerBound: null,
-						unboundedExpectedRemainingRequests: null,
-						averageContextTokenIncrement: null,
-						windowRequestUpperBound: null,
-						expectedRemainingRequests: null,
-						breakevenRequests: null,
-						combinedBreakevenRequests: null,
-						effectiveHorizonRequests: null,
-						cacheWriteReadRatio,
-						incrementalCacheCostRatio: null,
-						priorCompactionCount: state.nativeCompactionCount,
-						carriedDebtTokens: state.cacheDebtTokens,
-						cacheDebtRepaymentTokens: state.cacheDebtRepaymentTokens,
-						compact: false,
-						reason: "horizon_unavailable" as const,
-					};
+				});
 			const decision: CompactionDecision =
 				priced.compact && !nativeCompactionFeasible(context.sessionManager.getBranch(), keepRecentTokens)
 					? { ...priced, compact: false, reason: "native_not_compactable" }
 					: priced;
 			const structural = requestedReset ||
-				(decision.compact && selectCompactionMode({ plan: state.plan, progress: state.pendingProgress }) === "reset");
+				(decision.compact && (decision.reason === "window_protection" ||
+					selectCompactionMode({ plan: state.plan, progress: state.pendingProgress }) === "reset"));
+			// Without a complete structured handoff, preserve Pi's recent projected
+			// tail, including the assistant/tool-result groups selected by its cut rules.
+			// The local index is a recovery aid, never a substitute for that workset.
+			const retainedTail = !requestedReset && decision.reason === "window_protection" &&
+				selectCompactionMode({ plan: state.plan, progress: state.pendingProgress }) !== "reset"
+				? nativeCompactionCut(context.sessionManager.getBranch(), keepRecentTokens) : undefined;
+			const identityForAudit = windowIdentity(nextWindowNumber());
+			const decisionRecord: WindowLedgerRecord = {
+				transitionId: randomUUID(), stage: "decision", event: structural ? "reset" : "summary",
+				reason: requestedReset ? "manual" : decision.reason, decision,
+				windowNumber: nextWindowNumber(), windowId: identityForAudit.windowId, previousWindowId: identityForAudit.previousWindowId,
+				firstKeptEntryId: retainedTail ?? (structural ? "retain-none" : "pending"), tokensBefore: writeTokens, fragmentBytes: 0,
+				at: new Date().toISOString(),
+				...(!structural && !decision.compact ? { outcome: "deferred" as const } : {}),
+			};
+			if (!structural) {
+				await audit(context, decisionRecord);
+				if (decision.compact) pendingAudit = { record: decisionRecord, removedTokens: 0 };
+			}
 			if (structural) {
 				const continuationFiles = recentChangedFiles(state.pendingProgress);
 				const windowNumber = nextWindowNumber();
@@ -642,6 +704,8 @@ export function createOnlineContextCompactExtension(options: OnlineContextCompac
 					notesIndex: await noteIndex(context),
 					directives: collectUserDirectives(context.sessionManager.getBranch()),
 					userReferences: collectUserReferences(context.sessionManager.getBranch()),
+					recentHistory: recentHistoryReferences(context.sessionManager.getBranch()),
+					pendingCommands: pendingCommandReferences(context.sessionManager.getBranch()),
 				};
 				const reset: PendingReset = { windowNumber, checkpoint, fragment: formatWindowFragment(checkpoint) };
 				const writeTokens = requestedReset ? contextBudget(context).tokens : decision.writeTokens;
@@ -657,33 +721,19 @@ export function createOnlineContextCompactExtension(options: OnlineContextCompac
 				const details = {
 					solPiWindow: {
 						version: 1,
-						mode: "reset",
+						mode: retainedTail ? "tail" : "reset",
 						windowNumber,
 						windowId: identity.windowId,
 						previousWindowId: identity.previousWindowId,
 						checkpoint,
+						transitionId: decisionRecord.transitionId,
 					},
 				};
-				try {
-					await appendWindowLedger(runtimeRoot(context), {
-						event: "reset",
-						reason: "manual",
-						windowNumber,
-						windowId: identity.windowId,
-						previousWindowId: identity.previousWindowId,
-						firstKeptEntryId: "retain-none",
-						tokensBefore: writeTokens,
-						fragmentBytes: Buffer.byteLength(reset.fragment, "utf8"),
-						at: new Date().toISOString(),
-					});
-				} catch (error) {
-					const reason = error instanceof Error ? error.message : String(error);
-					console.error(`[onlinecontextcompact] window ledger write failed: ${reason}`);
-				}
 				const removed = Math.max(0, archiveTokens - memoTokens);
-				if (removed > 0) showSolPiSavings(context, "Online Context Compact", formatSavingsCount(removed, "context tokens removed"));
+				pendingAudit = { record: { ...decisionRecord, fragmentBytes: Buffer.byteLength(reset.fragment, "utf8") }, removedTokens: removed };
+				await audit(context, pendingAudit.record);
 				const drafts: SessionBoundaryDraft[] = [
-					{ type: "compaction", summary: reset.fragment, firstKeptEntryId: null, details },
+					{ type: "compaction", summary: reset.fragment, firstKeptEntryId: retainedTail ?? null, details },
 					{
 						type: "custom_message",
 						customType: "sol-pi-online-context-compact",
@@ -708,6 +758,7 @@ export function createOnlineContextCompactExtension(options: OnlineContextCompac
 
 		pi.on("agent_settled", async (_event, context) => {
 			if (pendingBoundaryState) {
+				await finishAudit(context, "rejected");
 				state = restoreOnlineState(context.sessionManager.getBranch());
 				pendingBoundaryState = undefined;
 				compactionInFlight = false;
@@ -716,12 +767,18 @@ export function createOnlineContextCompactExtension(options: OnlineContextCompac
 			const pending = selected;
 			selected = undefined;
 			const requestedReset = resetRequested;
+			if (lastTurnFailed || context.signal?.aborted) {
+				resetRequested = false;
+				await finishAudit(context, "aborted");
+				return;
+			}
 			if (!pending && !requestedReset) return;
 			if (requestedReset) resetRequested = false;
 			// The priced path already cleared this check at turn_end; a reset that
 			// arrives on its own has not, and Pi throws rather than no-ops when there
 			// is nothing to archive.
 			if (!pending && !nativeCompactionFeasible(context.sessionManager.getBranch(), keepRecentTokens)) {
+				await finishAudit(context, "noop");
 				return;
 			}
 
@@ -742,6 +799,8 @@ export function createOnlineContextCompactExtension(options: OnlineContextCompac
 					notesIndex: await noteIndex(context),
 					directives: collectUserDirectives(context.sessionManager.getBranch()),
 					userReferences: collectUserReferences(context.sessionManager.getBranch()),
+					recentHistory: recentHistoryReferences(context.sessionManager.getBranch()),
+					pendingCommands: pendingCommandReferences(context.sessionManager.getBranch()),
 				};
 				pendingReset = { windowNumber, checkpoint, fragment: formatWindowFragment(checkpoint) };
 			}
@@ -777,14 +836,7 @@ export function createOnlineContextCompactExtension(options: OnlineContextCompac
 						onComplete: (compaction) => {
 							try {
 								compacted = true;
-								const removed = Math.max(0, archiveTokens - tokenEstimate(compaction.summary));
-								if (removed > 0) {
-									showSolPiSavings(
-										context,
-										"Online Context Compact",
-										formatSavingsCount(removed, "context tokens removed"),
-									);
-								}
+								if (pendingAudit) pendingAudit = { ...pendingAudit, removedTokens: Math.max(0, archiveTokens - tokenEstimate(compaction.summary)) };
 							} finally {
 								finish();
 							}
@@ -796,8 +848,11 @@ export function createOnlineContextCompactExtension(options: OnlineContextCompac
 					});
 				});
 				compactionInFlight = false;
+				if (compacted) await finishAudit(context, "committed");
 				const nativeNoop = compactionError?.message.includes("Nothing to compact (session too small)") ||
 					compactionError?.message.includes("Already compacted");
+				if (!compacted) await finishAudit(context, nativeNoop ? "noop" :
+					compactionError?.name === "AbortError" || compactionError?.message === "Compaction cancelled" ? "aborted" : "failed");
 				if (
 					compactionError &&
 					compactionError.name !== "AbortError" &&
@@ -807,7 +862,7 @@ export function createOnlineContextCompactExtension(options: OnlineContextCompac
 					throw compactionError;
 				}
 
-				if (compacted) {
+				if (compacted && !context.signal?.aborted && !lastTurnFailed) {
 					// Pi 0.87.0: sendMessage({triggerTurn:true}) from agent_settled
 					// pushes a deferred action that Pi awaits in _emitAgentSettled.
 					// No settlement barrier is needed — Pi keeps the process alive
@@ -834,22 +889,14 @@ export function createOnlineContextCompactExtension(options: OnlineContextCompac
 			pendingReset = undefined;
 			const windowNumber = intent?.windowNumber ?? nextWindowNumber();
 			const identity = windowIdentity(windowNumber);
-			try {
-				await appendWindowLedger(runtimeRoot(context), {
-					event: intent ? "reset" : "summary",
-					reason: event.reason,
-					windowNumber,
-					windowId: identity.windowId,
-					previousWindowId: identity.previousWindowId,
-					firstKeptEntryId: event.preparation.firstKeptEntryId,
-					tokensBefore: event.preparation.tokensBefore,
-					fragmentBytes: intent ? Buffer.byteLength(intent.fragment, "utf8") : 0,
-					at: new Date().toISOString(),
-				});
-			} catch (error) {
-				// Fail open: an audit-trail problem must never block compaction.
-				const reason = error instanceof Error ? error.message : String(error);
-				console.error(`[onlinecontextcompact] window ledger write failed: ${reason}`);
+			if (!pendingAudit) {
+				pendingAudit = { removedTokens: 0, record: {
+					transitionId: randomUUID(), stage: "decision", event: intent ? "reset" : "summary", reason: event.reason,
+					windowNumber, windowId: identity.windowId, previousWindowId: identity.previousWindowId,
+					firstKeptEntryId: event.preparation.firstKeptEntryId, tokensBefore: event.preparation.tokensBefore,
+					fragmentBytes: intent ? Buffer.byteLength(intent.fragment, "utf8") : 0, at: new Date().toISOString(),
+				} };
+				await audit(context, pendingAudit.record);
 			}
 			if (!intent) return;
 			return {
@@ -871,8 +918,21 @@ export function createOnlineContextCompactExtension(options: OnlineContextCompac
 			};
 		});
 
-		pi.on("session_compact", (event, context) => {
+		pi.on("session_compact_failed", async (event, context) => {
+			await finishAudit(context, event.aborted ? "aborted" : "failed");
+			resetRequested = false;
+			selected = undefined;
+			pendingReset = undefined;
+		});
+
+		pi.on("session_compact", async (event, context) => {
 			ensureRestored(context);
+			if (pendingAudit) {
+				const archive = pendingAudit.record.decision?.archiveTokens ??
+					Math.max(0, event.compactionEntry.tokensBefore - tokenEstimate(context.getSystemPrompt()) - keepRecentTokens);
+				pendingAudit = { ...pendingAudit, removedTokens: Math.max(0, archive - tokenEstimate(event.compactionEntry.summary)) };
+				await finishAudit(context, "committed");
+			}
 			if (pendingBoundaryState) {
 				state = pendingBoundaryState;
 				pendingBoundaryState = undefined;
@@ -895,7 +955,8 @@ export function createOnlineContextCompactExtension(options: OnlineContextCompac
 			).messages;
 		});
 
-		pi.on("session_shutdown", () => {
+		pi.on("session_shutdown", async (_event, context) => {
+			await finishAudit(context, "aborted");
 			pendingBoundary = undefined;
 			selected = undefined;
 			activeDebt = undefined;

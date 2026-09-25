@@ -3,6 +3,8 @@
  * SPDX-License-Identifier: MIT
  */
 import type { SessionEntry } from "@earendil-works/pi-coding-agent";
+import { createHash } from "node:crypto";
+import { NOTE_VERSION_ENTRY, parseNoteVersion } from "./notes.ts";
 
 /**
  * Local, read-only history search over the current Pi session log.
@@ -24,12 +26,26 @@ export type HistoryHit = {
 	readonly index: number;
 	readonly kind: string;
 	readonly snippet: string;
+	readonly source: HistorySource;
+	readonly timestamp: string;
+	readonly tool?: string;
+};
+
+export type HistorySource = "message" | "compaction" | "branch_summary" | "note" | "checkpoint";
+export type HistorySearchOptions = {
+	readonly cursor?: string;
+	readonly role?: string;
+	readonly tool?: string;
+	readonly after?: string;
+	readonly before?: string;
+	readonly source?: HistorySource;
 };
 
 export type HistorySearch = {
 	readonly total: number;
 	readonly hits: readonly HistoryHit[];
 	readonly truncated: boolean;
+	readonly nextCursor: string | null;
 };
 
 type HistoryRecord = {
@@ -37,6 +53,10 @@ type HistoryRecord = {
 	readonly index: number;
 	readonly kind: string;
 	readonly text: string;
+	readonly source: HistorySource;
+	readonly timestamp: string;
+	readonly role?: string;
+	readonly tools?: readonly string[];
 };
 
 function byteLength(text: string): number {
@@ -73,23 +93,31 @@ function textFromContent(content: unknown): string {
 }
 
 function recordFor(entry: SessionEntry, index: number): HistoryRecord | undefined {
+	const base = { index, timestamp: entry.timestamp };
 	if (entry.type === "message") {
-		const message = entry.message as { role?: string; content?: unknown };
+		const message = entry.message as { role?: string; content?: unknown; toolName?: string };
 		const role = typeof message.role === "string" ? message.role : "message";
 		const text = textFromContent(message.content);
 		if (!text) return undefined;
 		const kind = role === "toolResult" ? "tool result" : role;
-		return { id: entry.id, index, kind, text };
+		const tools = typeof message.toolName === "string" ? [message.toolName] :
+			Array.isArray(message.content) ? message.content.flatMap((part) =>
+				part?.type === "toolCall" && typeof part.name === "string" ? [part.name] : []) : [];
+		return { ...base, id: entry.id, kind, text, source: "message", role, tools };
 	}
 	if (entry.type === "compaction") {
-		return { id: entry.id, index, kind: "compaction", text: entry.summary };
+		return { ...base, id: entry.id, kind: "compaction", text: entry.summary, source: "compaction" };
 	}
 	if (entry.type === "branch_summary") {
-		return { id: entry.id, index, kind: "branch summary", text: entry.summary };
+		return { ...base, id: entry.id, kind: "branch summary", text: entry.summary, source: "branch_summary" };
 	}
 	if (entry.type === "custom_message") {
 		const text = textFromContent(entry.content);
-		return text ? { id: entry.id, index, kind: "note", text } : undefined;
+		return text ? { ...base, id: entry.id, kind: "note", text, source: "note" } : undefined;
+	}
+	if (entry.type === "custom" && entry.customType === NOTE_VERSION_ENTRY) {
+		const note = parseNoteVersion(entry.data);
+		return note ? { ...base, id: entry.id, kind: "note", text: `${note.slug}\n${note.body}`, source: "note" } : undefined;
 	}
 	return undefined;
 }
@@ -99,8 +127,40 @@ function recordsOf(entries: readonly SessionEntry[]): HistoryRecord[] {
 	for (const [offset, entry] of entries.entries()) {
 		const record = recordFor(entry, offset + 1);
 		if (record) records.push(record);
+		if (entry.type === "compaction") {
+			const details = entry.details as { solPiWindow?: { windowId?: string; checkpoint?: unknown } } | undefined;
+			if (details?.solPiWindow?.windowId && details.solPiWindow.checkpoint) {
+				records.push({ id: `checkpoint-${details.solPiWindow.windowId}`, index: offset + 1, kind: "checkpoint",
+					text: JSON.stringify(details.solPiWindow.checkpoint, null, 2), source: "checkpoint", timestamp: entry.timestamp });
+			}
+		}
 	}
 	return records;
+}
+
+/** A deterministic local index, never a generated summary or replacement evidence. */
+export function recentHistoryReferences(entries: readonly SessionEntry[]): readonly { id: string; kind: string; preview: string }[] {
+	return recordsOf(entries).filter((record) => record.source !== "checkpoint").slice(-12).reverse()
+		.map((record) => ({ id: record.id, kind: record.kind, preview: sliceBytes(record.text.replace(/\s+/gu, " "), 240) }));
+}
+
+/** Last recorded process state is a recovery pointer, never proof a process is still alive. */
+export function pendingCommandReferences(entries: readonly SessionEntry[]): readonly { handle: string; sourceId: string; lastKnownStatus: string }[] {
+	const commands = new Map<string, { handle: string; sourceId: string; lastKnownStatus: string; pending: boolean }>();
+	for (const entry of entries) {
+		if (entry.type !== "message" || entry.message.role !== "toolResult" ||
+			!["bash", "powershell", "exec_wait", "exec_list", "exec_kill"].includes(entry.message.toolName)) continue;
+		const details = entry.message.details as Record<string, unknown> | undefined;
+		const snapshots = Array.isArray(details?.handles) ? details.handles : [details?.commandYield ?? details];
+		for (const value of snapshots) {
+			if (!value || typeof value !== "object") continue;
+			const snapshot = value as Record<string, unknown>;
+			if (typeof snapshot.id !== "string" || !/^exec_[a-f0-9]+$/u.test(snapshot.id) || typeof snapshot.status !== "string") continue;
+			commands.set(snapshot.id, { handle: snapshot.id, sourceId: entry.id, lastKnownStatus: snapshot.status,
+				pending: snapshot.status === "running" || (typeof snapshot.pendingBytes === "number" && snapshot.pendingBytes > 0) });
+		}
+	}
+	return [...commands.values()].filter((command) => command.pending).map(({ pending: _pending, ...reference }) => reference);
 }
 
 function snippetAround(text: string, at: number, length: number): string {
@@ -112,39 +172,74 @@ function snippetAround(text: string, at: number, length: number): string {
 	return `${head}${body}${tail}`;
 }
 
-/** Case-insensitive substring search over the readable parts of a session log. */
+/** Newest-first local search. A cursor pins a branch snapshot and the filters. */
 export function searchHistory(
 	entries: readonly SessionEntry[],
 	query: string,
 	limit: number = HISTORY_DEFAULT_LIMIT,
+	options: HistorySearchOptions = {},
 ): HistorySearch {
 	const needle = query.trim().toLowerCase();
-	if (!needle) return { total: 0, hits: [], truncated: false };
+	if (!needle) return { total: 0, hits: [], truncated: false, nextCursor: null };
 	const requested = Math.min(Math.max(1, Math.trunc(limit) || 1), HISTORY_MAX_LIMIT);
+	const { cursor, ...filters } = options;
+	const fingerprint = createHash("sha256").update(JSON.stringify([needle, filters.role ?? null, filters.tool ?? null,
+		filters.after ?? null, filters.before ?? null, filters.source ?? null])).digest("hex");
+	const date = (value: string | undefined): number | undefined => {
+		if (value === undefined) return;
+		const parsed = Date.parse(value);
+		if (!Number.isFinite(parsed)) throw new Error("History time filters must be valid ISO timestamps");
+		return parsed;
+	};
+	const after = date(options.after), before = date(options.before);
+	if (after !== undefined && before !== undefined && after >= before) throw new Error("History after must precede before");
+	let snapshot = entries.at(-1)?.id ?? null;
+	let last: string | undefined;
+	if (cursor !== undefined) {
+		try {
+			const decoded = JSON.parse(Buffer.from(cursor, "base64url").toString("utf8")) as Record<string, unknown>;
+			if (decoded.version !== 1 || decoded.fingerprint !== fingerprint || typeof decoded.snapshot !== "string" || typeof decoded.last !== "string") throw new Error();
+			snapshot = decoded.snapshot;
+			last = decoded.last;
+		} catch { throw new Error("Invalid history cursor or changed filters; restart history_search"); }
+	}
+	const snapshotIndex = snapshot === null ? -1 : entries.findIndex((entry) => entry.id === snapshot);
+	if (snapshot !== null && snapshotIndex < 0) throw new Error("History cursor snapshot is not on the current branch; restart history_search");
+	const records = recordsOf(entries.slice(0, snapshotIndex + 1)).reverse();
+	const matches = records.filter((record) => {
+		const timestamp = Date.parse(record.timestamp);
+		return (!options.source || record.source === options.source) && (!options.role || record.role === options.role) &&
+			(!options.tool || record.tools?.includes(options.tool)) &&
+			(after === undefined || timestamp >= after) && (before === undefined || timestamp < before) &&
+			record.text.toLowerCase().includes(needle);
+	});
+	const start = last === undefined ? 0 : matches.findIndex((record) => record.id === last) + 1;
+	if (last !== undefined && start === 0) throw new Error("History cursor entry is unavailable; restart history_search");
 	const hits: HistoryHit[] = [];
-	let total = 0;
-	let truncated = false;
 	let bytes = 0;
-	for (const record of recordsOf(entries)) {
+	for (const record of matches.slice(start)) {
 		const at = record.text.toLowerCase().indexOf(needle);
-		if (at < 0) continue;
-		total += 1;
-		if (hits.length >= requested) continue;
+		if (hits.length >= requested) break;
 		const hit: HistoryHit = {
 			id: record.id,
 			index: record.index,
 			kind: record.kind,
 			snippet: snippetAround(record.text, at, needle.length),
+			source: record.source,
+			timestamp: record.timestamp,
+			...(record.tools?.[0] ? { tool: record.tools[0] } : {}),
 		};
 		const size = byteLength(hit.snippet) + hit.id.length + 32;
 		if (bytes + size > HISTORY_HINT_MAX_BYTES) {
-			truncated = true;
-			continue;
+			break;
 		}
 		bytes += size;
 		hits.push(hit);
 	}
-	return { total, hits, truncated: truncated || total > hits.length };
+	const truncated = start + hits.length < matches.length;
+	const nextCursor = truncated && hits.length > 0 ? Buffer.from(JSON.stringify({ version: 1, fingerprint, snapshot,
+		last: hits.at(-1)!.id })).toString("base64url") : null;
+	return { total: matches.length, hits, truncated, nextCursor };
 }
 
 /** Full checkpoint lives on the compaction entry, not in a truncated preview. */
@@ -155,7 +250,8 @@ function checkpointRecord(entries: readonly SessionEntry[], id: string): History
 		if (entry?.type !== "compaction") continue;
 		const details = entry.details as { solPiWindow?: { windowId?: string; checkpoint?: unknown } } | undefined;
 		if (`checkpoint-${details?.solPiWindow?.windowId}` !== id || !details?.solPiWindow?.checkpoint) continue;
-		return { id, index: index + 1, kind: "checkpoint", text: JSON.stringify(details.solPiWindow.checkpoint, null, 2) };
+		return { id, index: index + 1, kind: "checkpoint", text: JSON.stringify(details.solPiWindow.checkpoint, null, 2),
+			source: "checkpoint", timestamp: entry.timestamp };
 	}
 	return undefined;
 }

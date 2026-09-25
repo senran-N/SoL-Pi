@@ -15,7 +15,7 @@
  *
  * Nothing is trusted on the way back: a citation survives only if the quoted
  * text is at that path and line, and an answer that claims a finding without a
- * single surviving citation is refused rather than delivered.
+ * missing or invalid citation is refused as a whole rather than partially kept.
  *
  * The top-level SoL-Pi config enables this mechanism and selects the explorer
  * route. Authentication stays with Pi; storage comes from the session.
@@ -26,7 +26,7 @@ import { Type } from "typebox";
 import { runtimeRoot } from "../../runtime-paths.ts";
 import { formatSavingsCount, renderSolPiTool, showSolPiSavings } from "../../tui.ts";
 import type { Citation, RejectedCitation } from "./citation.ts";
-import { EXPLORATION_RECEIPT_PREFIX, loadExplorationConfig, type ExplorationConfigOptions } from "./config.ts";
+import { EXPLORATION_RECEIPT_PREFIX, loadExplorationConfig, SKIPPED_DIRECTORIES, type ExplorationConfigOptions } from "./config.ts";
 import { runExploration, type ExplorationOutcome } from "./explorer.ts";
 import type { ExplorerCall } from "./provider.ts";
 
@@ -51,20 +51,33 @@ export function formatExplorationResult(outcome: ExplorationOutcome): string {
 		EXPLORATION_RECEIPT_PREFIX,
 		`exploration_id=${outcome.explorationId}`,
 		`found=${outcome.found}`,
+		`status=${outcome.status}`,
 		`steps=${outcome.steps}`,
 		`rejected_citations=${outcome.rejected.length}`,
 		`transcript=${outcome.transcriptPath}`,
+		`audit_status=${outcome.audit.status}`,
+		`audit_failures=${JSON.stringify(outcome.audit.failures)}`,
+		`observation_artifacts=${outcome.observations.filter((item) => item.archived).length}/${outcome.observations.length}`,
+		`inspected_scope=${JSON.stringify(outcome.coverage)}`,
+		`excluded_paths=${JSON.stringify(outcome.excludedPaths)}`,
+		`recursive_search_skips=${JSON.stringify([...SKIPPED_DIRECTORIES])}; symlinks are not traversed`,
+		"verification=quoted source bytes checked at delivery; claim semantics are not proven",
 		"answer:",
-		outcome.answer,
+		...(outcome.claims.length > 0
+			? outcome.claims.map((claim, index) => `claim_${index + 1} evidence=${JSON.stringify(claim.citations.map((citation) => outcome.citations.indexOf(citation) + 1))}: ${claim.text}`)
+			: [outcome.answer]),
 	];
 	if (outcome.citations.length > 0) {
 		lines.push("verified_evidence:", ...citationLines(outcome.citations));
 	} else if (!outcome.found) {
 		lines.push(
 			"verified_evidence:",
-			"- none; this is a negative result, not a failure to look. Read the transcript before searching the same way again.",
+			outcome.status === "not_found_in_scope"
+				? "- none; no finding in the recorded scope. This is not evidence of project-wide absence."
+				: "- none; inspection is incomplete. Further investigation is required.",
 		);
 	}
+	if (outcome.audit.status === "incomplete") lines.push("audit_note=the transcript or observations are incomplete; full replay is unavailable");
 	if (outcome.rejected.length > 0) {
 		lines.push(`note=${outcome.rejected.length} citation(s) were discarded because the quote was not at that line`);
 	}
@@ -130,7 +143,7 @@ export function createScopedExplorationExtension(options: ScopedExplorationOptio
 					showSolPiSavings(
 						context,
 						"Scoped Exploration",
-						formatSavingsCount(Math.ceil(avoided / 4), "context tokens avoided"),
+						formatSavingsCount(Math.ceil(avoided / 4), "estimated context tokens avoided"),
 					);
 				}
 
@@ -139,6 +152,11 @@ export function createScopedExplorationExtension(options: ScopedExplorationOptio
 					details: {
 						exploration_id: outcome.explorationId,
 						found: outcome.found,
+						status: outcome.status,
+						claims: outcome.claims,
+						coverage: outcome.coverage,
+						audit: outcome.audit,
+						observations: outcome.observations,
 						steps: outcome.steps,
 						citations: outcome.citations.length,
 						rejected: rejectedDetail(outcome.rejected),
@@ -156,10 +174,10 @@ export function createScopedExplorationExtension(options: ScopedExplorationOptio
 				);
 			},
 			renderResult(result, { isPartial }, theme) {
-				const details = result.details as { steps?: number; citations?: number } | undefined;
+				const details = result.details as { steps?: number; citations?: number; status?: string } | undefined;
 				const summary = isPartial
 					? "Exploring in a separate context..."
-					: `Answered in ${details?.steps ?? 0} steps with ${details?.citations ?? 0} verified citation(s)`;
+					: `${details?.status ?? "Answered"} in ${details?.steps ?? 0} steps with ${details?.citations ?? 0} source-checked citation(s)`;
 				return renderSolPiTool(
 					theme,
 					"Scoped Exploration",
@@ -186,10 +204,10 @@ export {
 } from "./config.ts";
 export { parseCitations, verifyCitations, type Citation, type RejectedCitation } from "./citation.ts";
 export { ExplorationIncompleteError, runExploration, type ExplorationOutcome } from "./explorer.ts";
-export { parseAction, type ExplorerAction } from "./protocol.ts";
+export { parseAction, type ExplorerAction, type ExplorationClaim, type ExplorationStatus } from "./protocol.ts";
 export { ExplorerModelUnavailableError, type ExplorerCall, type ExplorerTurn } from "./provider.ts";
 export { grepFiles, listDirectory, readSlice, resolveInside } from "./search.ts";
-export { transcriptPath } from "./transcript.ts";
+export { transcriptPath, observationPath, readArchivedObservation, type AuditStatus, type ObservationArtifact } from "./transcript.ts";
 
 export function registerScopedExploration(pi: ExtensionAPI, options: ScopedExplorationOptions = {}): void {
 	createScopedExplorationExtension(options)(pi);

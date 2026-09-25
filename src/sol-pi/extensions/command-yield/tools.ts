@@ -15,13 +15,14 @@ import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { Text } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
 import { renderSolPiTool } from "../../tui.ts";
+import { COMMAND_RESULT_SCHEMA } from "./command-results.ts";
 import { MAX_YIELD_TIME_MS, MIN_YIELD_TIME_MS } from "./config.ts";
 import { type Handle, type HandleSnapshot, isHandleId, type Registry } from "./registry.ts";
 
 const WAIT_MAX_BYTES = 16 * 1024;
 const WAIT_MAX_LINES = 400;
-const WAIT_HEADER_RESERVE_BYTES = 512;
-const WAIT_HEADER_LINES = 2;
+const WAIT_HEADER_RESERVE_BYTES = 1024;
+const WAIT_HEADER_LINES = 3;
 
 const WAIT_LIMITS = {
 	maxBytes: WAIT_MAX_BYTES - WAIT_HEADER_RESERVE_BYTES,
@@ -85,21 +86,26 @@ export function registerCommandYieldTools(pi: ExtensionAPI, options: CommandYiel
 			const increment = registry.take(handle, WAIT_LIMITS);
 			const snapshot = registry.snapshot(handle);
 			const header = [
-				`[exec_wait ${describe(snapshot)} new_bytes=${increment.bytes} new_lines=${increment.lines}]`,
+				`[exec_wait ${describe(snapshot)} command_sha256=${snapshot.commandSha256} category=${snapshot.diagnosticCategory} start_byte=${increment.startOffset} end_byte=${increment.endOffset} new_bytes=${increment.bytes} new_lines=${increment.lines}]`,
 				snapshot.status === "running"
 					? `[still running; ${increment.remainingBytes} bytes pending, call exec_wait again with a larger yield_time_ms or exec_kill to stop it]`
-					: `[finished; ${increment.remainingBytes} bytes pending]`,
+					: increment.remainingBytes > 0
+						? `[process finished; ${increment.remainingBytes} bytes pending; call exec_wait again to collect the remaining output]`
+						: `[finished; 0 bytes pending]`,
 			].join("\n");
 			const dropped =
 				increment.droppedBytes > 0
 					? `\n[${increment.droppedBytes} bytes of older output were dropped to bound memory]`
 					: "";
-			const text = `${header}${dropped}\n${increment.text}`;
-			const details = { ...snapshot, newBytes: increment.bytes, newLines: increment.lines };
+			const artifact = snapshot.outputPath ? `\n[full_output=${JSON.stringify(snapshot.outputPath)}]` : "";
+			const text = `${header}${artifact}${dropped}\n${increment.text}`;
+			const details = { ...snapshot, newBytes: increment.bytes, newLines: increment.lines,
+				commandYield: { schema: COMMAND_RESULT_SCHEMA, ...snapshot,
+					startByte: increment.startOffset, endByte: increment.endOffset, outputComplete: snapshot.status !== "running" && increment.remainingBytes === 0 } };
 
 			// A command that failed must still read as a failure to the agent and
 			// to every mechanism that keys off an errored tool result.
-			if (snapshot.status === "failed" || (typeof snapshot.exitCode === "number" && snapshot.exitCode !== 0)) {
+			if (snapshot.status === "failed" || snapshot.status === "killed" || (typeof snapshot.exitCode === "number" && snapshot.exitCode !== 0)) {
 				throw new Error(text);
 			}
 			return { content: [{ type: "text", text }], details };
@@ -126,7 +132,7 @@ export function registerCommandYieldTools(pi: ExtensionAPI, options: CommandYiel
 							`[exec_list count=${snapshots.length}]`,
 							...snapshots.map(
 								(snapshot) =>
-									`${describe(snapshot)} pending_bytes=${snapshot.pendingBytes} command=${JSON.stringify(snapshot.command)}`,
+									`${describe(snapshot)} pending_bytes=${snapshot.pendingBytes} category=${snapshot.diagnosticCategory} command_sha256=${snapshot.commandSha256}`,
 							),
 						].join("\n");
 			return { content: [{ type: "text", text }], details: { handles: snapshots } };

@@ -8,6 +8,7 @@ import { Text } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
 import { renderSolPiTool } from "../../tui.ts";
 import { PLAN_STATUSES, type PlanStep } from "./plan.ts";
+import type { HistorySearchOptions } from "./history.ts";
 
 export type PlanProgress = {
 	readonly files_changed: readonly string[];
@@ -34,6 +35,7 @@ export type NoteWriteInput = {
 export type NoteReadInput = {
 	readonly toolCallId: string;
 	readonly slug: string;
+	readonly importLegacy?: boolean;
 	readonly signal: AbortSignal | undefined;
 	readonly context: ExtensionContext;
 };
@@ -44,7 +46,7 @@ export type ContextToolInput = {
 	readonly context: ExtensionContext;
 };
 
-export type HistorySearchInput = {
+export type HistorySearchInput = HistorySearchOptions & {
 	readonly toolCallId: string;
 	readonly query: string;
 	readonly limit: number | undefined;
@@ -96,6 +98,7 @@ const NOTE_TOOL_GUIDELINES = [
 	'Use a short slug such as "api-surface" or "open-questions".',
 	"note_write replaces the whole note; note_append adds to the end of it.",
 	"After a compaction, read the notes index in the window fragment and pull a body back with note_read.",
+	"Notes follow the current session branch. Legacy mutable files are excluded until explicitly imported with note_read import_legacy=true.",
 ];
 
 const progressSchema = Type.Object(
@@ -210,14 +213,15 @@ export function registerOnlineTools(pi: ExtensionAPI, handlers: OnlineToolHandle
 	pi.registerTool({
 		name: "note_read",
 		label: "Read note",
-		description: `Read back a ${NOTE_TOOL_SUMMARY}.`,
+		description: `Read back a ${NOTE_TOOL_SUMMARY}. Reads the latest immutable version on this branch. To migrate an old on-disk note deliberately, set import_legacy=true; this records it on the current branch.`,
 		promptSnippet: "Read back a durable note",
 		promptGuidelines: NOTE_TOOL_GUIDELINES,
 		renderShell: "self",
-		parameters: Type.Object({ slug: noteSlugSchema }, { additionalProperties: false }),
+		parameters: Type.Object({ slug: noteSlugSchema,
+			import_legacy: Type.Optional(Type.Boolean({ description: "Explicitly import a legacy mutable note if no version exists on this branch." })) }, { additionalProperties: false }),
 		executionMode: "sequential",
 		execute: async (toolCallId, params, signal, _onUpdate, context) =>
-			await handlers.noteRead({ toolCallId, slug: params.slug, signal, context }),
+			await handlers.noteRead({ toolCallId, slug: params.slug, importLegacy: params.import_legacy, signal, context }),
 		renderCall(params, theme) {
 			return renderNoteTool(theme, `read ${params.slug}`);
 		},
@@ -276,7 +280,7 @@ export function registerOnlineTools(pi: ExtensionAPI, handlers: OnlineToolHandle
 		name: "history_search",
 		label: "Search session history",
 		description:
-			"Search this session's recorded history, including work that a compaction already removed from the window. Read-only, local, and bounded.",
+			"Search the current branch's recorded history, newest first. Filter by role/tool/time/source; follow next_cursor with the same filters for older results. source=checkpoint searches full structured window state, then history_read pages its evidence. Read-only, local, and bounded.",
 		promptSnippet: "Search earlier session history",
 		promptGuidelines: [
 			"Use history_search before asking the user to repeat something that happened earlier in this session.",
@@ -287,12 +291,18 @@ export function registerOnlineTools(pi: ExtensionAPI, handlers: OnlineToolHandle
 			{
 				query: Type.String({ minLength: 1, maxLength: 512 }),
 				limit: Type.Optional(Type.Integer({ minimum: 1, maximum: 32 })),
+				cursor: Type.Optional(Type.String({ maxLength: 2048, description: "next_cursor from the preceding page; keep query and filters unchanged." })),
+				role: Type.Optional(Type.String({ maxLength: 64, description: "Message role, e.g. user, assistant, toolResult." })),
+				tool: Type.Optional(Type.String({ maxLength: 128, description: "Exact tool name on a call or result." })),
+				after: Type.Optional(Type.String({ maxLength: 64, description: "Inclusive ISO timestamp." })),
+				before: Type.Optional(Type.String({ maxLength: 64, description: "Exclusive ISO timestamp." })),
+				source: Type.Optional(Type.Union((["message", "compaction", "branch_summary", "note", "checkpoint"] as const).map((source) => Type.Literal(source)))),
 			},
 			{ additionalProperties: false },
 		),
 		executionMode: "sequential",
 		execute: async (toolCallId, params, signal, _onUpdate, context) =>
-			await handlers.historySearch({ toolCallId, query: params.query, limit: params.limit, signal, context }),
+			await handlers.historySearch({ toolCallId, ...params, limit: params.limit, signal, context }),
 		renderCall(params, theme) {
 			return renderContextTool(theme, `search history for ${params.query}`, HISTORY_SAVING);
 		},

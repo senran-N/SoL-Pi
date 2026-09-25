@@ -25,6 +25,7 @@ import type {
 	ExtensionFactory,
 	ToolResultEvent,
 } from "@earendil-works/pi-coding-agent";
+import { dirname } from "node:path";
 import { runtimeRoot } from "../../runtime-paths.ts";
 import { UsageLedgerError } from "../../usage/ledger.ts";
 import { formatSavingsBytes, showSolPiSavings } from "../../tui.ts";
@@ -44,6 +45,7 @@ import {
 import { createJournal, type Journal } from "./journal.ts";
 import { callReducer, type ProviderResult } from "./provider.ts";
 import { receiptText, validateReceipt } from "./receipt.ts";
+import { deterministicDiagnostics } from "./diagnostics.ts";
 
 export interface ReducedToolResult {
 	readonly content: ToolResultEvent["content"];
@@ -57,6 +59,11 @@ function errorName(error: unknown): string | undefined {
 	return isRecord(error) && typeof error.name === "string" ? error.name : undefined;
 }
 
+/** Provider errors can contain request fragments, headers, or credentials. */
+function safeProviderError(errorMessage: string | undefined): string | undefined {
+	return errorMessage === undefined ? undefined : "Reducer model call returned an error.";
+}
+
 export async function reduceToolResult(
 	journal: Journal,
 	config: ReducerConfig,
@@ -64,9 +71,11 @@ export async function reduceToolResult(
 	context: ExtensionContext,
 	cache?: ReceiptCache,
 ): Promise<ReducedToolResult | undefined> {
-	const reducible = await reducibleToolResult(event);
-	if (!reducible || !DIAGNOSTIC_COMMAND.test(reducible.command)) return undefined;
+	if (context.signal?.aborted) return undefined;
+	const reducible = await reducibleToolResult(event, dirname(config.storeRoot));
+	if (!reducible || reducible.diagnosticCategory === "other") return undefined;
 	const { body, command } = reducible;
+	const isError = reducible.isError;
 	if (Buffer.byteLength(body, "utf8") < config.minBytes) return undefined;
 	if (body.length > config.maxChars) {
 		journal("fallback", { reason: "source-over-max-chars", sourceChars: body.length, maxChars: config.maxChars });
@@ -80,8 +89,10 @@ export async function reduceToolResult(
 	const archive = await archiveBody(archiveRoot(config), body);
 	journal("candidate", {
 		toolCallId: event.toolCallId,
-		commandSha256: sha256(command),
-		isError: event.isError,
+		commandSha256: reducible.commandSha256,
+		diagnosticCategory: reducible.diagnosticCategory,
+		sourceScope: reducible.sourceScope,
+		isError,
 		sourceSha256: archive.hash,
 		sourceBytes: archive.bytes,
 		sourceLines: archive.lines,
@@ -92,12 +103,15 @@ export async function reduceToolResult(
 	// metadata are deliberately excluded: project onto the current result below.
 	const cacheKey = sha256(JSON.stringify([
 		REDUCER_RECEIPT_SCHEMA, config.storeRoot, config.runId,
-		config.reducerProvider, config.reducerModel, config.maxOutputTokens, command, event.isError, archive.hash,
+		config.reducerProvider, config.reducerModel, config.maxOutputTokens, reducible.commandSha256, isError, archive.hash,
 	]));
-	const cached = context.signal?.aborted ? undefined : cache?.get(cacheKey);
+	const deterministic = deterministicDiagnostics(body, archive, isError);
+	const cached = deterministic ? undefined : cache?.get(cacheKey);
 	let provider: ProviderResult;
 	try {
-		provider = cached ?? await callReducer(config, command, event.isError, archive, body, context);
+		provider = deterministic ? { ok: true, outputText: deterministic, provider: "local", model: "deterministic-diagnostics",
+			errorMessage: undefined, stopReason: "stop", usage: { input: 0, output: 0, totalTokens: 0, cacheRead: 0, cacheWrite: 0 } }
+			: cached ?? await callReducer(config, command, isError, archive, body, context);
 	} catch (error) {
 		// Falling back must not hide an accounting write failure after a paid call.
 		if (error instanceof UsageLedgerError) throw error;
@@ -115,7 +129,9 @@ export async function reduceToolResult(
 		return undefined;
 	}
 
-	if (cached) {
+	if (deterministic) {
+		journal("deterministic", { toolCallId: event.toolCallId, sourceSha256: archive.hash });
+	} else if (cached) {
 		journal("cache_hit", { toolCallId: event.toolCallId, sourceSha256: archive.hash });
 	} else {
 		journal("provider_response", {
@@ -124,7 +140,7 @@ export async function reduceToolResult(
 			provider: provider.provider,
 			model: provider.model,
 			stopReason: provider.stopReason,
-			errorMessage: provider.errorMessage,
+			errorMessage: safeProviderError(provider.errorMessage),
 			usage: provider.usage,
 		});
 	}
@@ -134,12 +150,12 @@ export async function reduceToolResult(
 			sourceSha256: archive.hash,
 			reason: "model-response-error",
 			stopReason: provider.stopReason,
-			errorMessage: provider.errorMessage,
+			errorMessage: safeProviderError(provider.errorMessage),
 		});
 		return undefined;
 	}
 
-	const checked = validateReceipt(provider.outputText, archive, body, event.isError);
+	const checked = validateReceipt(provider.outputText, archive, body, isError);
 	if (!checked.ok) {
 		cache?.delete(cacheKey);
 		journal("fallback", {
@@ -150,7 +166,7 @@ export async function reduceToolResult(
 		});
 		return undefined;
 	}
-	const receipt = receiptText(command, archive, checked.value, provider, cached !== undefined);
+	const receipt = receiptText(command, archive, checked.value, provider, cached !== undefined, reducible.commandSha256, reducible.sourceScope);
 	const receiptBytes = Buffer.byteLength(receipt, "utf8");
 	if (receiptBytes >= archive.bytes) {
 		journal("fallback", {
@@ -165,7 +181,7 @@ export async function reduceToolResult(
 	}
 	journal("applied", {
 		toolCallId: event.toolCallId,
-		commandSha256: sha256(command),
+		commandSha256: reducible.commandSha256,
 		sourceSha256: archive.hash,
 		sourceBytes: archive.bytes,
 		receiptSha256: sha256(receipt),
@@ -174,11 +190,11 @@ export async function reduceToolResult(
 		uncertain: checked.value.uncertain,
 		...(cached ? { cacheHit: true } : { usage: provider.usage }),
 	});
-	if (!cached) cache?.set(cacheKey, provider);
+	if (!cached && !deterministic) cache?.set(cacheKey, provider);
 	showSolPiSavings(context, "Luna Delegating", formatSavingsBytes(archive.bytes - receiptBytes));
 	return {
 		content: reducible.projectReceipt(receipt),
-		isError: event.isError,
+		isError,
 		details: {
 			...(isRecord(event.details) ? event.details : {}),
 			evidencePreservingReducer: {
@@ -190,6 +206,8 @@ export async function reduceToolResult(
 				evidenceCount: checked.value.evidence.length,
 				uncertain: checked.value.uncertain,
 				cacheHit: cached !== undefined,
+				reductionMode: deterministic ? "deterministic" : "model",
+				sourceScope: reducible.sourceScope,
 			},
 		},
 	};

@@ -30,7 +30,7 @@ it("is either explicitly unavailable or fully functional without atomic no-follo
 	const pi = new FakePi();
 	let registrationError: unknown;
 	try {
-		createObservationPackExtension()(pi.asExtensionApi());
+		createObservationPackExtension({ cacheWriteReadRatio: 0 })(pi.asExtensionApi());
 	} catch (error) {
 		registrationError = error;
 	}

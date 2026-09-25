@@ -44,7 +44,7 @@ export function registerConfiguredFeatures(pi: ExtensionAPI, config: SolPiConfig
 	if (config.actionFusion) {
 		registerActionFusion(pi, commandYield ? { bashOptions: { operations: commandYield.bashOperations } } : {});
 	}
-	if (config.observationPack) registerObservationPack(pi);
+	if (config.observationPack) registerObservationPack(pi, { cacheWriteReadRatio: config.cacheWriteReadRatio });
 	if (config.evidencePreservingReducer) {
 		registerEvidencePreservingReducer(pi, {
 			reducerModel: config.evidencePreservingReducerModel,

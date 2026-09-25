@@ -213,7 +213,7 @@ export function placeholderFor(observation: Observation): string {
 	const head = completeLineExcerpt(observation.text, headBudget, false);
 	const tail = completeLineExcerpt(observation.text, tailBudget, true);
 	return [
-		`[large ${observation.isError ? "failed " : ""}tool result replaced after its first ${FULL_SENDS} provider requests]`,
+		`[large ${observation.isError ? "failed " : ""}tool result replaced by a recallable excerpt]`,
 		`id: ${observation.id}`,
 		`tool: ${observation.toolName}`,
 		`outcome: ${observation.isError ? "error" : "ok"}`,

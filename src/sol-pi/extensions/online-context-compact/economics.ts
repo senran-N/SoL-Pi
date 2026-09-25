@@ -67,6 +67,10 @@ export type CompactionDecision = {
 const MINIMUM_VARIANCE_SAMPLES = 3;
 const SMALL_SAMPLE_SCALE = 0.5;
 
+export function isWindowPressure(tokens: number, window: number | null, reserve = DEFAULT_COMPACTION_ECONOMICS.windowReserveTokens): boolean {
+	return window !== null && tokens >= window - Math.min(reserve, window * 0.25);
+}
+
 export function estimateRemainingRequests(input: {
 	readonly completedBoundaryRequestCounts: readonly number[];
 	readonly remainingBoundaries: number;
@@ -167,13 +171,7 @@ export function decideCompaction(input: {
 						horizon.windowRequestUpperBound ?? Number.POSITIVE_INFINITY,
 					)
 				: horizon.expectedRemainingRequests;
-	const windowReserveTokens =
-		input.contextWindowTokens === null
-			? input.economics.windowReserveTokens
-			: Math.min(input.economics.windowReserveTokens, input.contextWindowTokens * 0.25);
-	const windowProtection =
-		input.contextWindowTokens !== null &&
-		input.contextTokens >= input.contextWindowTokens - windowReserveTokens;
+	const windowProtection = isWindowPressure(input.contextTokens, input.contextWindowTokens, input.economics.windowReserveTokens);
 	const baseEconomic =
 		horizon !== null &&
 		horizon.expectedRemainingRequests > 0 &&

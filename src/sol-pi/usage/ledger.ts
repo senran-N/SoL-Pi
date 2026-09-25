@@ -33,6 +33,7 @@ export const zeroTokens = (): Tokens => ({ input: 0, output: 0, cacheRead: 0, ca
 export const usageLedgerPath = (root: string): string => join(root, "usage.jsonl");
 const object = (value: unknown): value is Record<string, unknown> => typeof value === "object" && value !== null;
 const nonnegative = (value: unknown): value is number => typeof value === "number" && Number.isFinite(value) && value >= 0;
+const preparedRoots = new Set<string>();
 
 /** Copy only numeric fields. Never persist provider objects, prompts or error text. */
 export function tokenUsage(value: unknown): Tokens | null {
@@ -55,10 +56,14 @@ export class UsageLedgerError extends Error {
 
 async function appendRecord(root: string, record: AuxiliaryRecord): Promise<void> {
 	try {
-		await mkdir(root, { recursive: true });
+		if (!preparedRoots.has(root)) {
+			await mkdir(root, { recursive: true });
+			preparedRoots.add(root);
+		}
 		const path = usageLedgerPath(root);
 		await withFileMutationQueue(path, () => appendFile(path, `${JSON.stringify(record)}\n`, "utf8"));
 	} catch {
+		preparedRoots.delete(root);
 		// Do not copy filesystem/provider error messages, which can contain secrets.
 		throw new UsageLedgerError("Could not persist SoL-Pi usage. Inspect the session's usage.jsonl before retrying a model call.");
 	}

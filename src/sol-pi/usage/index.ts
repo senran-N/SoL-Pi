@@ -7,6 +7,7 @@ import { Type } from "typebox";
 import { runtimeRoot } from "../runtime-paths.ts";
 import { readUsageLedger } from "./ledger.ts";
 import { usageReport } from "./report.ts";
+import { optimizationReport } from "./optimization.ts";
 
 export function registerUsageReport(pi: ExtensionAPI): void {
 	pi.registerTool({
@@ -18,7 +19,8 @@ export function registerUsageReport(pi: ExtensionAPI): void {
 			signal?.throwIfAborted();
 			const ledger = await readUsageLedger(runtimeRoot(context));
 			signal?.throwIfAborted();
-			const report = usageReport(context.sessionManager.getEntries(), ledger.records, ledger.invalidRecords);
+			const report = { ...usageReport(context.sessionManager.getEntries(), ledger.records, ledger.invalidRecords),
+				optimization: await optimizationReport(runtimeRoot(context)) };
 			return { content: [{ type: "text", text: JSON.stringify(report, null, 2) }], details: report };
 		},
 	});

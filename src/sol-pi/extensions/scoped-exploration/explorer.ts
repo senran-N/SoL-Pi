@@ -17,7 +17,7 @@
 import { createHash } from "node:crypto";
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { verifyCitations, type Citation, type RejectedCitation } from "./citation.ts";
-import { MAX_ANSWER_BYTES, MAX_CITATIONS, type ExplorationConfig } from "./config.ts";
+import { MAX_CITATIONS, type ExplorationConfig } from "./config.ts";
 import {
 	explorerInstructions,
 	explorerTask,
@@ -26,9 +26,12 @@ import {
 	formatReadObservation,
 	parseAction,
 	stepsRemainingNotice,
+	type ExplorationClaim,
+	type ExplorationStatus,
+	type FormattedObservation,
 } from "./protocol.ts";
 import { callExplorer, type ExplorerCall, type ExplorerTurn } from "./provider.ts";
-import { createTranscript, transcriptPath } from "./transcript.ts";
+import { createTranscript, transcriptPath, type AuditStatus, type ObservationArtifact } from "./transcript.ts";
 import { grepFiles, listDirectory, readSlice } from "./search.ts";
 
 export class ExplorationIncompleteError extends Error {
@@ -38,12 +41,30 @@ export class ExplorationIncompleteError extends Error {
 export type ExplorationOutcome = {
 	readonly explorationId: string;
 	readonly found: boolean;
+	readonly status: ExplorationStatus;
+	readonly claims: readonly ExplorationClaim[];
 	readonly answer: string;
 	readonly citations: readonly Citation[];
 	readonly rejected: readonly RejectedCitation[];
 	readonly steps: number;
 	readonly observedBytes: number;
 	readonly transcriptPath: string;
+	readonly coverage: readonly ExplorationCoverage[];
+	readonly excludedPaths: readonly string[];
+	readonly observations: readonly ObservationArtifact[];
+	readonly audit: AuditStatus;
+};
+
+export type ExplorationCoverage = {
+	readonly kind: "grep" | "read" | "list";
+	readonly path: string;
+	readonly pattern?: string;
+	readonly firstLine?: number;
+	readonly lastLine?: number;
+	readonly scannedFiles: number;
+	readonly skippedFiles: number;
+	readonly truncated: boolean;
+	readonly failed: boolean;
 };
 
 export type ExplorationInput = {
@@ -58,14 +79,6 @@ export type ExplorationInput = {
 function explorationId(question: string): string {
 	const seed = `${question}\0${Date.now()}\0${Math.random()}`;
 	return `exp_${createHash("sha256").update(seed, "utf8").digest("hex").slice(0, 16)}`;
-}
-
-function clampAnswer(answer: string): string {
-	if (Buffer.byteLength(answer, "utf8") <= MAX_ANSWER_BYTES) return answer;
-	const buffer = Buffer.from(answer, "utf8");
-	let end = MAX_ANSWER_BYTES - 3;
-	while (end > 0 && (buffer[end] ?? 0) >= 0x80 && (buffer[end] ?? 0) < 0xc0) end -= 1;
-	return `${buffer.subarray(0, end).toString("utf8")}...`;
 }
 
 /** One overall deadline for the exploration, relayed from the turn's own signal. */
@@ -90,19 +103,24 @@ function explorationSignal(parent: AbortSignal | undefined, timeoutMs: number): 
 	};
 }
 
-async function observe(root: string, action: Exclude<ReturnType<typeof parseAction>, undefined>, excludedPaths: readonly string[]): Promise<string> {
+type Observation = { readonly formatted: FormattedObservation; readonly coverage: ExplorationCoverage };
+
+async function observe(root: string, action: Exclude<ReturnType<typeof parseAction>, undefined>, excludedPaths: readonly string[]): Promise<Observation> {
 	switch (action.kind) {
 		case "grep": {
 			const found = await grepFiles({ root, pattern: action.pattern, path: action.path, excludedPaths });
-			return formatGrepObservation({ pattern: action.pattern, hits: found.hits, truncated: found.truncated });
+			const formatted = formatGrepObservation({ ...found, pattern: action.pattern });
+			return { formatted, coverage: { kind: "grep", path: found.path, pattern: action.pattern, scannedFiles: found.scanned, skippedFiles: found.skipped, truncated: formatted.truncated, failed: false } };
 		}
 		case "read": {
 			const slice = await readSlice({ root, path: action.path, excludedPaths, offset: action.offset, limit: action.limit });
-			return formatReadObservation(slice);
+			const formatted = formatReadObservation(slice);
+			return { formatted, coverage: { kind: "read", path: slice.path, firstLine: slice.firstLine, lastLine: slice.firstLine + slice.lines.length - 1, scannedFiles: slice.lines.length > 0 ? 1 : 0, skippedFiles: 0, truncated: formatted.truncated, failed: false } };
 		}
 		case "list": {
 			const listing = await listDirectory({ root, path: action.path, excludedPaths });
-			return formatListObservation(listing);
+			const formatted = formatListObservation(listing);
+			return { formatted, coverage: { kind: "list", path: listing.path, scannedFiles: 0, skippedFiles: 0, truncated: formatted.truncated, failed: false } };
 		}
 		case "answer":
 			throw new Error("answer is not an observable action");
@@ -117,6 +135,8 @@ export async function runExploration(input: ExplorationInput): Promise<Explorati
 	const turns: ExplorerTurn[] = [{ role: "user", text: explorerTask(input.question) }];
 	const instructions = explorerInstructions(input.config.maxSteps, input.config.excludedPaths);
 	let observedBytes = 0;
+	const coverage: ExplorationCoverage[] = [];
+	const observations: ObservationArtifact[] = [];
 
 	await transcript({
 		event: "start",
@@ -161,10 +181,9 @@ export async function runExploration(input: ExplorationInput): Promise<Explorati
 					verified: check.verified.length,
 					rejected: check.rejected.map((entry) => ({ ...entry.citation, reason: entry.reason })),
 				});
-				// A claimed finding with nothing that checks out is the one case the
-				// main agent must never receive as an answer. Spend a step asking for
-				// real lines; out of steps, fail loudly instead.
-				if (action.found && check.verified.length === 0) {
+				// Claims are indivisible. Partial citation success cannot rescue the
+				// unsupported remainder of either a structured or legacy answer.
+				if (check.rejected.length > 0 || (action.found && check.verified.length === 0)) {
 					if (remaining < 1) {
 						throw new ExplorationIncompleteError(
 							"The exploration answered with citations that could not be verified against the files.",
@@ -173,32 +192,62 @@ export async function runExploration(input: ExplorationInput): Promise<Explorati
 					turns.push({
 						role: "user",
 						text:
-							"None of those citations were found at the lines you gave. Re-read the file and cite exact lines. " +
+							"The answer was rejected because not every citation verified (or a finding had no citations). " +
+							"Re-read the file and revise every affected claim; do not keep a claim by merely dropping its failed citation. " +
 							stepsRemainingNotice(remaining),
 					});
 					continue;
 				}
+				const inspected = coverage.some((item) => item.kind !== "list" && !item.failed && item.scannedFiles > 0);
+				const incomplete = !inspected || coverage.some((item) => item.truncated || item.failed);
+				const status: ExplorationStatus = action.found ? "found"
+					: action.status === "incomplete" || incomplete ? "incomplete" : "not_found_in_scope";
+				// Do not pass through a confident negative written without inspection,
+				// or after a bounded scan. Absence has not been established in that case.
+				const answer = status === "incomplete" && action.status !== "incomplete"
+					? "Exploration incomplete: no verified finding, and the recorded content inspection is missing, truncated, or failed. Absence has not been established."
+					: action.answer;
+				const claims = answer === action.answer ? action.claims : [];
+				if (check.sources.length > 0) {
+					const sourceArtifact = await transcript.archive(JSON.stringify(check.sources));
+					observations.push(sourceArtifact);
+					await transcript({ event: "verification", step, observation: sourceArtifact });
+				}
+				await transcript({ event: "result", step, status, claims, coverage, audit: transcript.audit() });
 				return {
 					explorationId: id,
 					found: action.found,
-					answer: clampAnswer(action.answer),
+					status,
+					claims,
+					answer,
 					citations: check.verified,
 					rejected: check.rejected,
 					steps: step,
 					observedBytes,
 					transcriptPath: transcriptPath(input.config.storeRoot, id),
+					coverage,
+					excludedPaths: input.config.excludedPaths,
+					observations,
+					audit: transcript.audit(),
 				};
 			}
 
-			let observation: string;
+			let observation: Observation;
 			try {
 				observation = await observe(input.root, action, input.config.excludedPaths);
 			} catch (error) {
-				observation = `That action failed: ${error instanceof Error ? error.message : String(error)}`;
+				observation = {
+					formatted: { text: `scope=${JSON.stringify({ kind: action.kind, path: action.path ?? ".", truncated: true, failed: true })}\nThat action failed: ${error instanceof Error ? error.message : String(error)}`, truncated: true },
+					coverage: { kind: action.kind, path: action.path ?? ".", scannedFiles: 0, skippedFiles: 0, truncated: true, failed: true },
+				};
 			}
-			observedBytes += Buffer.byteLength(observation, "utf8");
-			await transcript({ event: "action", step, action: action.kind, observationBytes: Buffer.byteLength(observation, "utf8") });
-			turns.push({ role: "user", text: `${observation}\n\n${stepsRemainingNotice(remaining)}` });
+			const observedText = `${observation.formatted.text}\n\n${stepsRemainingNotice(remaining)}`;
+			const archived = await transcript.archive(observedText);
+			observations.push(archived);
+			coverage.push(observation.coverage);
+			observedBytes += Buffer.byteLength(observedText, "utf8");
+			await transcript({ event: "action", step, action: action.kind, coverage: observation.coverage, observation: archived });
+			turns.push({ role: "user", text: observedText });
 		}
 
 		throw new ExplorationIncompleteError(

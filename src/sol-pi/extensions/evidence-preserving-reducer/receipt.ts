@@ -149,16 +149,19 @@ export function receiptText(
 	validated: ValidatedReceipt,
 	provider: ProviderResult,
 	cacheHit = false,
+	commandSha256 = sha256(command),
+	sourceScope = "complete-command",
 ): string {
 	const lines = [
 		REDUCER_RECEIPT_PREFIX,
 		`status=${validated.status}`,
 		`uncertain=${validated.uncertain}`,
-		`command_sha256=${sha256(command)}`,
+		`command_sha256=${commandSha256}`,
 		`source_sha256=${archive.hash}`,
 		`source_bytes=${archive.bytes}`,
 		`source_lines=${archive.lines}`,
 		`source_artifact=${archive.path}`,
+		`source_scope=${sourceScope}`,
 		`reducer_provider=${provider.provider}`,
 		`reducer_model=${provider.model}`,
 		...(cacheHit
@@ -174,7 +177,7 @@ export function receiptText(
 	if (validated.evidence.length === 0) lines.push("- none");
 	lines.push(
 		"authority=Sol retains diagnosis, repair, rerun, and pass/fail adjudication",
-		"readback=use bash with an explicit byte or line range on source_artifact when exact context is needed",
+		"readback=use the read tool with path=source_artifact, offset=<1-based line>, limit=<line count>; quoted line numbers refer to the complete archived artifact",
 	);
 	return lines.join("\n");
 }

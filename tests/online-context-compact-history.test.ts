@@ -82,9 +82,9 @@ describe("history search", () => {
 	it("finds matches across user, assistant, tool, and compaction records", () => {
 		const search = searchHistory(historyEntries(), "widget");
 		expect(search.total).toBe(4);
-		expect(search.hits.map((hit) => hit.id)).toEqual(["e1", "e2", "e3", "e4"]);
-		expect(search.hits[2]?.kind).toBe("tool result");
-		expect(search.hits[3]?.kind).toBe("compaction");
+		expect(search.hits.map((hit) => hit.id)).toEqual(["e4", "e3", "e2", "e1"]);
+		expect(search.hits[1]?.kind).toBe("tool result");
+		expect(search.hits[0]?.kind).toBe("compaction");
 	});
 
 	it("ignores internal custom entries and matches tool call arguments", () => {
@@ -99,7 +99,7 @@ describe("history search", () => {
 
 	it("is case-insensitive and reports no match cleanly", () => {
 		expect(searchHistory(historyEntries(), "STAGING").total).toBe(2);
-		expect(searchHistory(historyEntries(), "kubernetes")).toEqual({ total: 0, hits: [], truncated: false });
+		expect(searchHistory(historyEntries(), "kubernetes")).toEqual({ total: 0, hits: [], truncated: false, nextCursor: null });
 	});
 
 	it("caps hits by limit and marks truncation, including a byte budget", () => {

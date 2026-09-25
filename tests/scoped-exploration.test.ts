@@ -2,7 +2,8 @@
  * SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  * SPDX-License-Identifier: MIT
  */
-import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { createHash } from "node:crypto";
+import { mkdir, mkdtemp, readFile, readdir, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
@@ -21,9 +22,13 @@ import {
 	resolveInside,
 	resolveMaxSteps,
 	runExploration,
+	readArchivedObservation,
+	formatExplorationResult,
 	verifyCitations,
 	type ExplorerCall,
 } from "../src/sol-pi/extensions/scoped-exploration/index.ts";
+import { formatGrepObservation } from "../src/sol-pi/extensions/scoped-exploration/protocol.ts";
+import { createTranscript } from "../src/sol-pi/extensions/scoped-exploration/transcript.ts";
 import { componentText, FakePi, FakeSessionManager, fakeContext, plainTheme } from "./helpers.ts";
 
 const directories: string[] = [];
@@ -180,6 +185,8 @@ describe("scoped exploration loop", () => {
 			"action",
 			"reply",
 			"answer",
+			"verification",
+			"result",
 		]);
 	});
 
@@ -231,7 +238,7 @@ describe("scoped exploration loop", () => {
 		).rejects.toBeInstanceOf(ExplorationIncompleteError);
 	});
 
-	it("returns a negative result with no citations", async () => {
+	it("marks an unsearched negative answer incomplete instead of endorsing its denial", async () => {
 		const root = await project();
 		const session = await sessionRoot();
 		const scripted = scriptedCall([
@@ -252,6 +259,9 @@ describe("scoped exploration loop", () => {
 		});
 
 		expect(outcome.found).toBe(false);
+		expect(outcome.status).toBe("incomplete");
+		expect(outcome.answer).not.toContain("No upload retry budget exists");
+		expect(outcome.claims).toEqual([]);
 		expect(outcome.citations).toEqual([]);
 	});
 
@@ -388,7 +398,188 @@ describe("explore tool", () => {
 		const rendered = tool.renderCall!(args, plainTheme, { args, cwd: process.cwd() } as never);
 
 		expect(componentText(rendered)).toContain("⚡ SoL-Pi · Scoped Exploration");
-		expect(componentText(rendered)).toContain("Money saved");
+		expect(componentText(rendered)).toContain("Efficiency");
+	});
+});
+
+describe("scoped exploration evidence and audit regressions", () => {
+	it("preserves scope and truncation for an empty search, including skipped large files", async () => {
+		const root = await project();
+		await writeFile(join(root, "large.txt"), Buffer.alloc(1_048_577, 65));
+		const found = await grepFiles({ root, pattern: "absent_literal" });
+		expect(found.hits).toEqual([]);
+		expect(found.truncated).toBe(true);
+		expect(found.skipped).toBe(1);
+		expect(found.scanned).toBeGreaterThan(0);
+		const observation = formatGrepObservation({ ...found, pattern: "absent_literal" });
+		expect(observation.text).toContain('"truncated":true');
+		expect(observation.text).toContain('"path":"."');
+		expect(observation.text).toContain(`"scanned_files":${found.scanned}`);
+		expect(observation.text).toContain("does not establish project-wide absence");
+	});
+
+	it("keeps scan metadata when the matching body exceeds the observation budget", () => {
+		const observation = formatGrepObservation({ path: "src", pattern: "x", scanned: 2, skipped: 0, truncated: false,
+			hits: Array.from({ length: 40 }, (_, index) => ({ path: "src/file.ts", line: index + 1, text: "x".repeat(400) })) });
+		expect(Buffer.byteLength(observation.text)).toBeLessThanOrEqual(4_096);
+		expect(observation.text).toMatch(/^scope=.*"path":"src".*"truncated":true.*"output_truncated":true/u);
+		const exhausted = formatGrepObservation({ path: ".", pattern: "not_seen", scanned: 2_000, skipped: 0, truncated: true, hits: [] });
+		expect(exhausted.text).toContain('"scanned_files":2000');
+		expect(exhausted.text).toContain('"truncated":true');
+	});
+
+	it("reports no finding only within a successful inspected scope", async () => {
+		const root = await project();
+		const session = await sessionRoot();
+		const scripted = scriptedCall([
+			JSON.stringify({ action: "grep", path: "src", pattern: "does_not_exist" }),
+			JSON.stringify({ action: "answer", found: false, answer: "No exact match in src.", citations: [] }),
+		]);
+		const outcome = await runExploration({ config: loadExplorationConfig(session), root, question: "find a literal", context: explorationContext(session, root), call: scripted.call });
+		expect(outcome.status).toBe("not_found_in_scope");
+		expect(outcome.coverage).toEqual([{ kind: "grep", path: "src", pattern: "does_not_exist", scannedFiles: 2, skippedFiles: 0, truncated: false, failed: false }]);
+		expect(formatExplorationResult(outcome)).toContain("not evidence of project-wide absence");
+	});
+
+	it("never turns a truncated zero-hit scan into a verified absence", async () => {
+		const root = await project();
+		const session = await sessionRoot();
+		await writeFile(join(root, "large.txt"), Buffer.alloc(1_048_577, 65));
+		const scripted = scriptedCall([
+			JSON.stringify({ action: "grep", pattern: "unseen" }),
+			JSON.stringify({ action: "answer", found: false, answer: "The project has no such code.", citations: [] }),
+		]);
+		const outcome = await runExploration({ config: loadExplorationConfig(session), root, question: "find unseen", context: explorationContext(session, root), call: scripted.call });
+		expect(outcome.status).toBe("incomplete");
+		expect(outcome.answer).not.toContain("The project has no such code");
+		expect(outcome.coverage[0]?.truncated).toBe(true);
+	});
+
+	it("rejects the whole legacy answer when just one of its citations fails", async () => {
+		const root = await project();
+		const session = await sessionRoot();
+		const scripted = scriptedCall([
+			JSON.stringify({ action: "answer", found: true, answer: "Retries are set locally and encrypted.", citations: [
+				{ path: "src/upload.ts", line: 2, quote: "const retryBudget = 3;" },
+				{ path: "src/upload.ts", line: 3, quote: "encrypt(retryBudget)" },
+			] }),
+			ANSWER,
+		]);
+		const outcome = await runExploration({ config: loadExplorationConfig(session), root, question: "retry handling?", context: explorationContext(session, root), call: scripted.call });
+		expect(outcome.steps).toBe(2);
+		expect(outcome.answer).not.toContain("encrypted");
+		expect(outcome.claims[0]?.citations).toEqual(outcome.citations);
+	});
+
+	it("associates each structured finding with citations and excludes uncited top-level prose", async () => {
+		const root = await project();
+		const session = await sessionRoot();
+		const scripted = scriptedCall([JSON.stringify({ action: "answer", status: "found", answer: "Unsupported extra statement", claims: [
+			{ text: "The budget is 3.", citations: [{ path: "src/upload.ts", line: 2, quote: "const retryBudget = 3;" }] },
+			{ text: "The budget is returned.", citations: [{ path: "src/upload.ts", line: 3, quote: "return retryBudget;" }] },
+		] })]);
+		const outcome = await runExploration({ config: loadExplorationConfig(session), root, question: "retry handling?", context: explorationContext(session, root), call: scripted.call });
+		expect(outcome.claims).toHaveLength(2);
+		const text = formatExplorationResult(outcome);
+		expect(text).toContain("claim_1 evidence=[1]");
+		expect(text).toContain("claim_2 evidence=[2]");
+		expect(text).not.toContain("Unsupported extra statement");
+		expect(text).toContain("claim semantics are not proven");
+	});
+
+	it("fails a structured answer when one claim has invalid evidence at the step limit", async () => {
+		const root = await project();
+		const session = await sessionRoot();
+		const scripted = scriptedCall([JSON.stringify({ action: "answer", status: "found", claims: [
+			{ text: "The budget is 3.", citations: [{ path: "src/upload.ts", line: 2, quote: "const retryBudget = 3;" }] },
+			{ text: "The budget is encrypted.", citations: [{ path: "src/upload.ts", line: 3, quote: "encrypt(retryBudget)" }] },
+		] })]);
+		await expect(runExploration({ config: loadExplorationConfig(session, { maxSteps: 1 }), root, question: "retry handling?", context: explorationContext(session, root), call: scripted.call })).rejects.toBeInstanceOf(ExplorationIncompleteError);
+	});
+
+	it("replays exactly what the explorer saw after the source file changes", async () => {
+		const root = await project();
+		const session = await sessionRoot();
+		const config = loadExplorationConfig(session);
+		let observed = "";
+		let step = 0;
+		const call: ExplorerCall = async (_config, _instructions, turns) => {
+			if (step++ === 0) return JSON.stringify({ action: "read", path: "src/upload.ts" });
+			observed = turns.at(-1)?.text ?? "";
+			return ANSWER;
+		};
+		const outcome = await runExploration({ config, root, question: "retry handling?", context: explorationContext(session, root), call });
+		await writeFile(join(root, "src", "upload.ts"), "source was replaced\n");
+		const artifact = outcome.observations[0]!;
+		expect(artifact.archived).toBe(true);
+		expect(await readArchivedObservation(config.storeRoot, artifact.sha256)).toBe(observed);
+		expect(observed).toContain("const retryBudget = 3;");
+		const records = (await readFile(outcome.transcriptPath, "utf8")).trim().split("\n").map((line) => JSON.parse(line));
+		expect(records.find((record) => record.event === "action").observation.sha256).toBe(artifact.sha256);
+		expect(outcome.audit).toEqual({ status: "complete", failures: [] });
+		await writeFile(artifact.path!, "tampered");
+		await expect(readArchivedObservation(config.storeRoot, artifact.sha256)).rejects.toThrow(/integrity/u);
+	});
+
+	it("marks storage failures in the returned receipt without claiming a complete transcript", async () => {
+		const root = await project();
+		const session = await sessionRoot();
+		const config = loadExplorationConfig(session);
+		await writeFile(config.storeRoot, "this path is a file");
+		const scripted = scriptedCall([JSON.stringify({ action: "read", path: "src/upload.ts" }), ANSWER]);
+		const outcome = await runExploration({ config, root, question: "retry handling?", context: explorationContext(session, root), call: scripted.call });
+		expect(outcome.found).toBe(true);
+		expect(outcome.audit.status).toBe("incomplete");
+		expect(outcome.audit.failures).toContain("transcript-write-failed");
+		expect(outcome.audit.failures).toContain("observation-write-failed");
+		expect(outcome.observations.every((item) => !item.archived && item.path === null)).toBe(true);
+		expect(formatExplorationResult(outcome)).toContain("full replay is unavailable");
+	});
+
+	it("preserves audit failure status when only the transcript fails", async () => {
+		const session = await sessionRoot();
+		await mkdir(join(session, "exp_test.jsonl"));
+		const transcript = createTranscript(session, "exp_test");
+		const observation = await transcript.archive("ordinary source observation");
+		await transcript({ event: "action", observation });
+		expect(observation.archived).toBe(true);
+		expect(transcript.audit()).toEqual({ status: "incomplete", failures: ["transcript-write-failed"] });
+	});
+
+	it("records a missing observation instead of pretending a writable transcript is enough", async () => {
+		const session = await sessionRoot();
+		await writeFile(join(session, "observations"), "not a directory");
+		const transcript = createTranscript(session, "exp_archive_failure");
+		const observation = await transcript.archive("the explorer saw this text");
+		await transcript({ event: "action", observation });
+		expect(transcript.audit()).toEqual({ status: "incomplete", failures: ["observation-write-failed"] });
+		const record = JSON.parse((await readFile(join(session, "exp_archive_failure.jsonl"), "utf8")).trim());
+		expect(record.observation).toMatchObject({ archived: false, path: null });
+	});
+
+	it("refuses an observations directory link for both archival and replay", async () => {
+		const session = await sessionRoot();
+		const outside = await sessionRoot();
+		const original = "outside bytes must never be read through the archive";
+		const sha256 = createHash("sha256").update(original).digest("hex");
+		await writeFile(join(outside, `${sha256}.txt`), original);
+		await symlink(outside, join(session, "observations"), process.platform === "win32" ? "junction" : "dir");
+		const transcript = createTranscript(session, "exp_link");
+		const artifact = await transcript.archive("new observed bytes");
+		expect(artifact.archived).toBe(false);
+		expect(transcript.audit().failures).toContain("observation-write-failed");
+		await expect(readArchivedObservation(session, sha256)).rejects.toThrow(/regular directory/u);
+		expect(await readdir(outside)).toEqual([`${sha256}.txt`]);
+		expect(await readFile(join(outside, `${sha256}.txt`), "utf8")).toBe(original);
+	});
+
+	it("does not archive obvious credential material and reports the audit omission", async () => {
+		const session = await sessionRoot();
+		const transcript = createTranscript(session, "exp_sensitive");
+		const observation = await transcript.archive("api_key = fake_test_marker_not_a_credential");
+		expect(observation.archived).toBe(false);
+		expect(observation.path).toBeNull();
+		expect(transcript.audit()).toEqual({ status: "incomplete", failures: ["sensitive-content-not-archived"] });
 	});
 });
 

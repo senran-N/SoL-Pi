@@ -116,6 +116,7 @@ function wrap(inner: BashOperations, options: YieldingOperationsOptions): BashOp
 			 * cursor is set from the offset the handle has reached right now.
 			 */
 			foreground = false;
+			execOptions.signal?.removeEventListener("abort", abortForeground);
 			handle.cursor = handle.endOffset;
 			forward(Buffer.from(`${endsWithNewline ? "" : "\n"}${yieldTrailer(handle, Date.now() - startedAt)}\n`, "utf8"));
 			// The command keeps running; a non-zero code here would read as failure.

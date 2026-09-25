@@ -30,7 +30,9 @@ import { Text } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
 import { runtimeRoot } from "../../runtime-paths.ts";
 import { formatSavingsCount, renderSolPiTool, showSolPiSavings } from "../../tui.ts";
-import { createLedger, readSendCounts, type Ledger } from "./ledger.ts";
+import { createLedger, readProjectionLedger, type Ledger } from "./ledger.ts";
+import { DEFAULT_PACK_CACHE_RATIO, packingDecision } from "./policy.ts";
+import { intentProjection, observationIntent, searchObservations } from "./retrieval.ts";
 import {
 	countLines,
 	createObservation,
@@ -97,13 +99,17 @@ function findObservationTargetFromMessages(
 	return undefined;
 }
 
-export function createObservationPackExtension(): ExtensionFactory {
+export interface ObservationPackOptions { readonly cacheWriteReadRatio?: number }
+
+export function createObservationPackExtension(options: ObservationPackOptions = {}): ExtensionFactory {
+	const ratio = options.cacheWriteReadRatio ?? DEFAULT_PACK_CACHE_RATIO;
+	if (!Number.isFinite(ratio) || ratio < 0) throw new Error("Observation Pack cache ratio must be finite and non-negative");
 	return (pi: ExtensionAPI) => {
-		const countsByRoot = new Map<string, Promise<Map<string, number>>>();
-		const countsFor = (root: string): Promise<Map<string, number>> => {
+		const countsByRoot = new Map<string, ReturnType<typeof readProjectionLedger>>();
+		const countsFor = (root: string): ReturnType<typeof readProjectionLedger> => {
 			let counts = countsByRoot.get(root);
 			if (!counts) {
-				counts = readSendCounts(join(root, "observation-pack", "ledger.jsonl")).catch((error: unknown) => {
+				counts = readProjectionLedger(join(root, "observation-pack", "ledger.jsonl")).catch((error: unknown) => {
 					// A failed read must not become a permanent empty recovery state.
 					countsByRoot.delete(root);
 					throw error;
@@ -128,6 +134,26 @@ export function createObservationPackExtension(): ExtensionFactory {
 			}
 			return ledger;
 		};
+
+		pi.registerTool({
+			name: "obs_search", label: "Search Observations",
+			description: "Search archived large text results on the current session branch, newest first. Returns exact recall offsets and a continuation cursor; no model call.",
+			promptSnippet: "Find evidence inside archived tool output before paging through it",
+			parameters: Type.Object({
+				query: Type.String({ minLength: 1, maxLength: 512 }),
+				id: Type.Optional(Type.String()), tool: Type.Optional(Type.String()),
+				after: Type.Optional(Type.String({ description: "Inclusive ISO timestamp" })),
+				before: Type.Optional(Type.String({ description: "Inclusive ISO timestamp" })),
+				cursor: Type.Optional(Type.String({ maxLength: 1024 })),
+				limit: Type.Optional(Type.Integer({ minimum: 1, maximum: 16 })),
+			}, { additionalProperties: false }),
+			async execute(_id, params, signal, _onUpdate, ctx) {
+				signal?.throwIfAborted();
+				const result = await searchObservations(ctx.sessionManager.getBranch(), runtimeRoot(ctx), params);
+				await ledgerFor(ctx)({ event: "search", hitCount: result.hits.length, scannedBytes: result.scanned_bytes, complete: result.complete });
+				return { content: [{ type: "text", text: JSON.stringify(result) }], details: result };
+			},
+		});
 
 		pi.registerTool({
 			name: "obs_recall",
@@ -206,7 +232,7 @@ export function createObservationPackExtension(): ExtensionFactory {
 			const projected = [...event.messages];
 			const root = runtimeRoot(ctx);
 			const edits: PendingContextEdit[] = [];
-			let sentCounts: Map<string, number> | undefined;
+			let recovered: Awaited<ReturnType<typeof readProjectionLedger>> | undefined;
 			// How many provider requests each message has already been part of,
 			// counted by the assistant messages that follow it.
 			const priorAssistantCounts = new Array<number>(event.messages.length);
@@ -227,11 +253,21 @@ export function createObservationPackExtension(): ExtensionFactory {
 					if (!observation) continue;
 					await ensureStored(observation);
 
-					sentCounts ??= await countsFor(root);
+					recovered ??= await countsFor(root);
+					const sentCounts = recovered.counts;
 					// Preserve the older session-history fallback when no ledger row
 					// exists (e.g. a fork), without shrinking a recovered allowance.
 					const previousSends = sentCounts.get(observation.id) ?? priorAssistantCounts[index] ?? 0;
-					if (previousSends < FULL_SENDS) {
+					const stable = recovered.packed.has(observation.id);
+					const intent = observationIntent(event.messages, observation, message.toolCallId);
+					const firstPass = Boolean(intent && (previousSends === 0 || recovered.firstPass.has(observation.id)));
+					const placeholder = firstPass ? intentProjection(observation, intent!) : placeholderFor(observation);
+					const placeholderTokens = estimateTokens(placeholder);
+					const removedTokens = Math.max(0, observation.tokens - placeholderTokens);
+					const decision = packingDecision({ context: ctx, messages: projected, savedTokens: removedTokens,
+						cacheWriteReadRatio: ratio, stable, firstProjection: firstPass && previousSends === 0 });
+					await ledgerFor(ctx)({ event: "decision", id: observation.id, ...decision, cacheWriteReadRatio: ratio });
+					if ((!stable && !firstPass && previousSends < FULL_SENDS && decision.reason !== "window_pressure") || !decision.pack) {
 						await ledgerFor(ctx)({
 							event: "full",
 							id: observation.id,
@@ -248,9 +284,6 @@ export function createObservationPackExtension(): ExtensionFactory {
 						continue;
 					}
 
-					const placeholder = placeholderFor(observation);
-					const placeholderTokens = estimateTokens(placeholder);
-					const removedTokens = Math.max(0, observation.tokens - placeholderTokens);
 					await ledgerFor(ctx)({
 						event: "placeholder",
 						id: observation.id,
@@ -264,8 +297,9 @@ export function createObservationPackExtension(): ExtensionFactory {
 						placeholderBytes: Buffer.byteLength(placeholder, "utf8"),
 						placeholderTokens,
 						removedTokens,
+						firstPass,
 					});
-					if (previousSends === FULL_SENDS) {
+					if (!stable) {
 						showSolPiSavings(
 							ctx,
 							"Observation Pack",
@@ -275,6 +309,8 @@ export function createObservationPackExtension(): ExtensionFactory {
 					projected[index] = { ...message, content: [{ type: "text", text: placeholder }] };
 					edits.push({ toolCallId: message.toolCallId, observationId: observation.id, placeholder });
 					sentCounts.set(observation.id, previousSends + 1);
+					recovered.packed.add(observation.id);
+					if (firstPass) recovered.firstPass.add(observation.id);
 				} catch (error) {
 					// Fail open: a packing failure must never cost the agent its observation.
 					const reason = error instanceof Error ? error.message : String(error);
@@ -340,8 +376,8 @@ export {
 	THRESHOLD_BYTES,
 } from "./observation.ts";
 
-export function registerObservationPack(pi: ExtensionAPI): void {
-	createObservationPackExtension()(pi);
+export function registerObservationPack(pi: ExtensionAPI, options: ObservationPackOptions = {}): void {
+	createObservationPackExtension(options)(pi);
 }
 
 export default registerObservationPack;

@@ -24,6 +24,8 @@ import {
 	type ExtensionAPI,
 	type ExtensionFactory,
 } from "@earendil-works/pi-coding-agent";
+import { join } from "node:path";
+import { runtimeRoot } from "../../runtime-paths.ts";
 import { DEFAULT_COMMAND_YIELD_TIME_MS } from "./config.ts";
 import { createYieldingOperations, createYieldingPowerShellOperations } from "./operations.ts";
 import { createRegistry, type Registry } from "./registry.ts";
@@ -52,6 +54,9 @@ export function createCommandYieldExtension(options: CommandYieldOptions = {}): 
 	const bashOperations = createYieldingOperations({ registry, yieldTimeMs, inner: options.inner });
 
 	const factory: ExtensionFactory = (pi: ExtensionAPI) => {
+		pi.on("session_start", (_event, context) => {
+			registry.setOutputRoot(join(runtimeRoot(context), "command-yield"));
+		});
 		const active = new Set(pi.getActiveTools());
 		// Pi runs one shell tool per platform; replace the one that is live.
 		const shells = active.has("powershell") ? ["powershell"] : ["bash"];
@@ -68,6 +73,10 @@ export function createCommandYieldExtension(options: CommandYieldOptions = {}): 
 			// Everything else about the tool stays Pi's; only the deadline is new.
 			pi.registerTool({
 				...definition,
+				async execute(toolCallId, params, signal, onUpdate, context) {
+					registry.setOutputRoot(join(runtimeRoot(context), "command-yield"));
+					return definition.execute(toolCallId, params, signal, onUpdate, context);
+				},
 				description: `${definition.description} A command still running after ${Math.round(yieldTimeMs / 1000)}s returns its output so far plus a handle and keeps running; continue it with exec_wait or stop it with exec_kill.`,
 			});
 		}

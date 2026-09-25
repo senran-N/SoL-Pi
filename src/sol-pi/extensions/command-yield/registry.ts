@@ -11,8 +11,11 @@
  */
 
 import { randomBytes } from "node:crypto";
+import { appendFileSync, closeSync, mkdirSync, openSync, readSync, writeSync } from "node:fs";
+import { join } from "node:path";
+import { commandIdentity, type DiagnosticCategory } from "./command-results.ts";
 
-/** Bytes retained per handle before the oldest undelivered output is dropped. */
+/** Memory budget for disk-backed handles; unread output remains in the spool. */
 export const RETAINED_BYTES = 1024 * 1024;
 
 const HANDLE_ID_PATTERN = /^exec_[a-f0-9]{12}$/u;
@@ -21,7 +24,8 @@ export type HandleStatus = "running" | "exited" | "killed" | "failed";
 
 export interface HandleSnapshot {
 	readonly id: string;
-	readonly command: string;
+	readonly commandSha256: string;
+	readonly diagnosticCategory: DiagnosticCategory;
 	readonly cwd: string;
 	readonly status: HandleStatus;
 	readonly exitCode: number | null | undefined;
@@ -32,6 +36,7 @@ export interface HandleSnapshot {
 	readonly pendingBytes: number;
 	/** Bytes discarded because the retention budget was reached. */
 	readonly droppedBytes: number;
+	readonly outputPath?: string;
 }
 
 export interface Increment {
@@ -41,6 +46,8 @@ export interface Increment {
 	/** Output still waiting after this increment, because a limit was reached. */
 	readonly remainingBytes: number;
 	readonly droppedBytes: number;
+	readonly startOffset: number;
+	readonly endOffset: number;
 }
 
 export interface IncrementLimits {
@@ -68,9 +75,17 @@ export interface Handle {
 	droppedBytes: number;
 	chunks: Buffer[];
 	waiters: Set<() => void>;
+	outputPath?: string;
+	/** Persistent read/write descriptor for the session spool. */
+	spoolFd?: number;
+	/** One bounded read window avoids reopening/scanning the spool for every page. */
+	readCache?: Buffer;
+	readCacheStart?: number;
 }
 
 export interface Registry {
+	/** Session-derived storage only; commands themselves are never written. */
+	setOutputRoot(root: string): void;
 	create(command: string, cwd: string): Handle;
 	get(id: string): Handle | undefined;
 	list(): HandleSnapshot[];
@@ -102,19 +117,17 @@ function countLines(text: string): number {
 /**
  * Trim retained output once it passes the budget.
  *
- * Dropping from the front can discard bytes the agent has not seen yet. That is
- * reported rather than hidden: a long-running stream must not grow without
- * bound, and a silent gap in a log is worse than a counted one.
+ * A persistent session spools every byte before trimming memory. Without
+ * session storage, only delivered bytes can be trimmed; unread evidence wins
+ * over the memory target.
  */
 function trim(handle: Handle): void {
 	while (handle.endOffset - handle.baseOffset > RETAINED_BYTES) {
+		// Only discard bytes that remain recoverable on disk or were delivered.
+		if (!handle.outputPath && handle.baseOffset + (handle.chunks[0]?.length ?? 0) > handle.cursor) return;
 		const oldest = handle.chunks.shift();
 		if (!oldest) return;
 		handle.baseOffset += oldest.length;
-		if (handle.cursor < handle.baseOffset) {
-			handle.droppedBytes += handle.baseOffset - handle.cursor;
-			handle.cursor = handle.baseOffset;
-		}
 	}
 }
 
@@ -122,6 +135,14 @@ function trim(handle: Handle): void {
 function trimUtf8End(buffer: Buffer, limit: number): number {
 	let end = limit;
 	while (end > 0 && end < buffer.length && ((buffer[end] ?? 0) & 0xc0) === 0x80) end -= 1;
+	// The process may have emitted only the first bytes of a UTF-8 character.
+	if (end === buffer.length && end > 0) {
+		let start = end - 1;
+		while (start > 0 && ((buffer[start] ?? 0) & 0xc0) === 0x80) start--;
+		const first = buffer[start] ?? 0;
+		const width = first >= 0xf0 && first <= 0xf4 ? 4 : first >= 0xe0 && first <= 0xef ? 3 : first >= 0xc2 && first <= 0xdf ? 2 : 1;
+		if (end - start < width) end = start;
+	}
 	return end;
 }
 
@@ -131,8 +152,13 @@ function notify(handle: Handle): void {
 
 export function createRegistry(): Registry {
 	const handles = new Map<string, Handle>();
+	let outputRoot: string | undefined;
 
 	const registry: Registry = {
+		setOutputRoot(root) {
+			mkdirSync(root, { recursive: true, mode: 0o700 });
+			outputRoot = root;
+		},
 		create(command, cwd) {
 			let id = `exec_${randomBytes(6).toString("hex")}`;
 			while (handles.has(id)) id = `exec_${randomBytes(6).toString("hex")}`;
@@ -153,6 +179,10 @@ export function createRegistry(): Registry {
 				chunks: [],
 				waiters: new Set(),
 			};
+			if (outputRoot) {
+				handle.outputPath = join(outputRoot, `${id}.log`);
+				handle.spoolFd = openSync(handle.outputPath, "wx+", 0o600);
+			}
 			handles.set(id, handle);
 			return handle;
 		},
@@ -167,10 +197,18 @@ export function createRegistry(): Registry {
 
 		discard(handle) {
 			handles.delete(handle.id);
+			if (handle.spoolFd !== undefined) {
+				closeSync(handle.spoolFd);
+				handle.spoolFd = undefined;
+			}
 		},
 
 		append(handle, chunk) {
 			if (chunk.length === 0) return;
+			if (handle.spoolFd !== undefined) {
+				let offset = 0;
+				while (offset < chunk.length) offset += writeSync(handle.spoolFd, chunk, offset, chunk.length - offset, null);
+			} else if (handle.outputPath) appendFileSync(handle.outputPath, chunk);
 			handle.chunks.push(chunk);
 			handle.endOffset += chunk.length;
 			trim(handle);
@@ -186,8 +224,28 @@ export function createRegistry(): Registry {
 			notify(handle);
 		},
 
-		take(handle, limits) {
-			const pending = Buffer.concat(handle.chunks).subarray(handle.cursor - handle.baseOffset);
+			take(handle, limits) {
+				const startOffset = handle.cursor;
+				let pending: Buffer;
+				if (handle.outputPath) {
+					const cacheStart = handle.readCacheStart;
+					const cacheEnd = cacheStart === undefined || !handle.readCache ? -1 : cacheStart + handle.readCache.length;
+					if (!handle.readCache || cacheStart === undefined || handle.cursor < cacheStart || handle.cursor >= cacheEnd) {
+						const cacheBytes = Math.min(handle.endOffset - handle.cursor, RETAINED_BYTES);
+						const cache = Buffer.alloc(cacheBytes);
+						const fd = handle.spoolFd ?? openSync(handle.outputPath, "r");
+						try {
+							const bytes = readSync(fd, cache, 0, cache.length, handle.cursor);
+							handle.readCache = cache.subarray(0, bytes);
+							handle.readCacheStart = handle.cursor;
+						} finally {
+							if (handle.spoolFd === undefined) closeSync(fd);
+						}
+					}
+					pending = handle.readCache?.subarray(handle.cursor - (handle.readCacheStart ?? handle.cursor)) ?? Buffer.alloc(0);
+			} else {
+				pending = Buffer.concat(handle.chunks).subarray(handle.cursor - handle.baseOffset);
+			}
 			const droppedBytes = handle.droppedBytes;
 			handle.droppedBytes = 0;
 
@@ -207,13 +265,26 @@ export function createRegistry(): Registry {
 			const slice = pending.subarray(0, end);
 			const text = slice.toString("utf8");
 
-			handle.cursor += slice.length;
+				handle.cursor += slice.length;
+				if (handle.readCache && handle.readCacheStart !== undefined && handle.cursor >= handle.readCacheStart + handle.readCache.length) {
+					handle.readCache = undefined;
+					handle.readCacheStart = undefined;
+				}
 			// Retained output the agent has now seen is no longer needed.
 			while (handle.chunks.length > 0) {
 				const oldest = handle.chunks[0];
 				if (!oldest || handle.baseOffset + oldest.length > handle.cursor) break;
 				handle.chunks.shift();
 				handle.baseOffset += oldest.length;
+			}
+			// A completed handle no longer needs its persistent descriptor once all
+			// bytes have been delivered. This keeps long sessions from accumulating
+			// one open file per yielded command while preserving the spool itself.
+			if (handle.status !== "running" && handle.cursor >= handle.endOffset && handle.spoolFd !== undefined) {
+				closeSync(handle.spoolFd);
+				handle.spoolFd = undefined;
+				handle.readCache = undefined;
+				handle.readCacheStart = undefined;
 			}
 
 			return {
@@ -222,21 +293,25 @@ export function createRegistry(): Registry {
 				lines: countLines(text),
 				remainingBytes: handle.endOffset - handle.cursor,
 				droppedBytes,
+				startOffset,
+				endOffset: handle.cursor,
 			};
 		},
 
 		snapshot(handle) {
 			return {
 				id: handle.id,
-				command: handle.command,
+				...commandIdentity(handle.command),
 				cwd: handle.cwd,
 				status: handle.status,
 				exitCode: handle.exitCode,
-				error: handle.error,
+				// Backend exception strings may embed command arguments or credentials.
+				error: handle.error ? "Command execution failed; inspect the output and status." : undefined,
 				startedAt: handle.startedAt,
 				settledAt: handle.settledAt,
 				pendingBytes: handle.endOffset - handle.cursor,
 				droppedBytes: handle.droppedBytes,
+				...(handle.outputPath ? { outputPath: handle.outputPath } : {}),
 			};
 		},
 

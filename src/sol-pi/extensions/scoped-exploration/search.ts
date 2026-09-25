@@ -28,6 +28,13 @@ import {
 } from "./config.ts";
 
 export type GrepHit = { readonly path: string; readonly line: number; readonly text: string };
+export type GrepResult = {
+	readonly path: string;
+	readonly hits: readonly GrepHit[];
+	readonly truncated: boolean;
+	readonly scanned: number;
+	readonly skipped: number;
+};
 
 export function isExcluded(root: string, file: string, patterns: readonly string[]): boolean {
 	const path = relativePath(root, file);
@@ -42,7 +49,13 @@ export function isExcluded(root: string, file: string, patterns: readonly string
 	});
 }
 
-export type ReadSlice = { readonly path: string; readonly firstLine: number; readonly lines: readonly string[]; readonly eof: boolean };
+export type ReadSlice = {
+	readonly path: string;
+	readonly firstLine: number;
+	readonly lines: readonly string[];
+	readonly eof: boolean;
+	readonly truncated: boolean;
+};
 
 const BINARY_PROBE_BYTES = 8_192;
 const MAX_LINE_CHARS = 400;
@@ -85,11 +98,15 @@ function clampLine(text: string): string {
 	return collapsed.length > MAX_LINE_CHARS ? `${collapsed.slice(0, MAX_LINE_CHARS)}...` : collapsed;
 }
 
-async function* walk(root: string, start: string, budget: { remaining: number }, excludedPaths: readonly string[]): AsyncGenerator<string> {
+type ScanBudget = { remaining: number; skipped: number; incomplete: boolean };
+
+async function* walk(root: string, start: string, budget: ScanBudget, excludedPaths: readonly string[]): AsyncGenerator<string> {
 	let entries: Dirent[];
 	try {
 		entries = await readdir(start, { withFileTypes: true });
 	} catch {
+		budget.skipped += 1;
+		budget.incomplete = true;
 		return;
 	}
 	for (const entry of entries) {
@@ -115,7 +132,7 @@ export async function grepFiles(input: {
 	readonly pattern: string;
 	readonly path?: string;
 	readonly excludedPaths?: readonly string[];
-}): Promise<{ readonly hits: readonly GrepHit[]; readonly truncated: boolean; readonly scanned: number }> {
+}): Promise<GrepResult> {
 	const needle = input.pattern.toLowerCase();
 	if (needle.length === 0) throw new Error("Search pattern must not be empty");
 	// One resolution of the root for the whole call: a hit's path is reported
@@ -124,9 +141,10 @@ export async function grepFiles(input: {
 	// relative path rather than one that climbs out of the project.
 	const rootReal = await realpath(input.root);
 	const start = input.path ? await resolveInside(input.root, input.path) : rootReal;
-	const budget = { remaining: SCAN_MAX_FILES };
+	const budget: ScanBudget = { remaining: SCAN_MAX_FILES, skipped: 0, incomplete: false };
 	const excludedPaths = input.excludedPaths ?? [];
 	const hits: GrepHit[] = [];
+	let scanned = 0;
 	let truncated = false;
 
 	const startStats: Stats = await lstat(start);
@@ -143,16 +161,25 @@ export async function grepFiles(input: {
 		try {
 			stats = await lstat(file);
 		} catch {
+			budget.skipped += 1;
 			continue;
 		}
-		if (!stats.isFile() || stats.size > SCAN_MAX_FILE_BYTES) continue;
+		if (!stats.isFile() || stats.size > SCAN_MAX_FILE_BYTES) {
+			budget.skipped += 1;
+			continue;
+		}
 		let buffer: Buffer;
 		try {
 			buffer = await readFile(file);
 		} catch {
+			budget.skipped += 1;
 			continue;
 		}
-		if (looksBinary(buffer)) continue;
+		if (looksBinary(buffer)) {
+			budget.skipped += 1;
+			continue;
+		}
+		scanned += 1;
 		const lines = buffer.toString("utf8").split("\n");
 		for (const [index, line] of lines.entries()) {
 			if (!line.toLowerCase().includes(needle)) continue;
@@ -160,11 +187,18 @@ export async function grepFiles(input: {
 				truncated = true;
 				break;
 			}
+			if (line.replace(/\r/gu, "").length > MAX_LINE_CHARS) truncated = true;
 			hits.push({ path: relativePath(rootReal, file), line: index + 1, text: clampLine(line) });
 		}
 	}
 
-	return { hits, truncated: truncated || budget.remaining <= 0, scanned: SCAN_MAX_FILES - budget.remaining };
+	return {
+		path: relativePath(rootReal, start) || ".",
+		hits,
+		truncated: truncated || budget.remaining <= 0 || budget.incomplete || budget.skipped > 0,
+		scanned,
+		skipped: budget.skipped,
+	};
 }
 
 export async function readSlice(input: {
@@ -186,12 +220,14 @@ export async function readSlice(input: {
 	const all = buffer.toString("utf8").split("\n");
 	const firstLine = Math.max(1, Math.trunc(input.offset ?? 1));
 	const limit = Math.min(Math.max(1, Math.trunc(input.limit ?? READ_MAX_LINES)), READ_MAX_LINES);
-	const slice = all.slice(firstLine - 1, firstLine - 1 + limit).map((line) => clampLine(line));
+	const sourceLines = all.slice(firstLine - 1, firstLine - 1 + limit);
+	const slice = sourceLines.map((line) => clampLine(line));
 	return {
 		path: relativePath(rootReal, file),
 		firstLine,
 		lines: slice,
 		eof: firstLine - 1 + slice.length >= all.length,
+		truncated: sourceLines.some((line) => line.replace(/\r/gu, "").length > MAX_LINE_CHARS),
 	};
 }
 

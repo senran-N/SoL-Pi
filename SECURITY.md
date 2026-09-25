@@ -6,10 +6,11 @@ SoL-Pi is a Pi extension. It runs with the filesystem, process, network, and cre
 
 - Action Fusion can modify files and run shell commands requested by the model.
 - ObservationPack stores large tool results under Pi's session directory.
+- Command Yield stores raw output from yielded commands in a restrictive session-derived spool so it can be drained exactly. Output may itself contain credentials; command text is never persisted, and the session directory must be protected like Pi's history.
 - Evidence-Preserving Reducer archives diagnostic logs locally and, when explicitly enabled, sends eligible logs through the configured reducer model using Pi-managed authentication.
 - The reducer skips text matching its likely-secret detector, but that detector is a precaution rather than a complete secret scanner. Do not enable remote reduction for workloads whose logs must remain local.
 - Scoped Exploration, when explicitly enabled, reads project files and sends the parts the explorer selects to the configured explorer model using Pi-managed authentication. It is read-only and confined to the project root, but it is not a secrets filter: a file the explorer reads can reach that model. Do not enable it for checkouts whose contents must remain local.
-- Scoped Exploration writes a full transcript of every exploration, including the text it read, under the session directory.
+- Scoped Exploration writes an auditable transcript and content-addressed observations under the session directory. Observations matching the sensitive-material guard are omitted and the result marks the audit incomplete; this guard is conservative and is not a complete secret scanner.
 - Online Context Compact stores plan and compaction state in Pi's session log; see below.
 - Project-local `.pi/sol-pi.json` files should be used only in trusted repositories.
 

@@ -149,7 +149,9 @@ async function runCompactionScenario(requestedCompactions: 1 | 2): Promise<void>
 		// summarization hook or provider request is needed for compaction.
 		expect(compactionRequests).toEqual([]);
 		const branch = sessionManager.getBranch();
-		expect(branch.filter((entry) => entry.type === "compaction")).toHaveLength(requestedCompactions);
+		// A fresh oversized history may trigger the independent hard-window guard
+		// before the first structured boundary. It is a valid emergency window.
+		expect(branch.filter((entry) => entry.type === "compaction")).toHaveLength(requestedCompactions + 1);
 		expect(
 			branch.filter(
 				(entry) =>
@@ -160,7 +162,12 @@ async function runCompactionScenario(requestedCompactions: 1 | 2): Promise<void>
 					entry.display === false,
 			),
 		).toHaveLength(requestedCompactions);
-		expect(branch.filter((entry) => entry.type === "compaction").every((entry) => entry.firstKeptEntryId === entry.id)).toBe(true);
+		const compactions = branch.filter((entry) => entry.type === "compaction");
+		expect(compactions.every((entry) => {
+			if (entry.firstKeptEntryId === entry.id) return true;
+			const mode = (entry.details as { solPiWindow?: { mode?: string } } | undefined)?.solPiWindow?.mode;
+			return mode === "tail" && Boolean(entry.firstKeptEntryId);
+		})).toBe(true);
 		expect(faux.state.callCount).toBe(requestedCompactions * 2 + 1);
 		expect(session.getLastAssistantText()).toBe(finalReply);
 		expect(settledCount).toBe(1);

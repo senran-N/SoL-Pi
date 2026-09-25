@@ -80,6 +80,7 @@ describe("SoL-Pi entrypoint", () => {
 			"exec_kill",
 			"edit",
 			"write",
+			"obs_search",
 			"obs_recall",
 			"update_plan",
 			"note_write",
@@ -100,6 +101,7 @@ describe("SoL-Pi entrypoint", () => {
 			"session_before_compact",
 			"session_before_tree",
 			"session_compact",
+			"session_compact_failed",
 			"session_shutdown",
 			"session_start",
 			"session_tree",
@@ -119,7 +121,7 @@ describe("SoL-Pi entrypoint", () => {
 		await pi.emit("session_start", { type: "session_start" }, ctx);
 
 		expect(loader).toHaveBeenCalledOnce();
-		expect(pi.registeredTools.map((tool) => tool.name)).toEqual(["sol_pi_diagnostics", "obs_recall", "sol_pi_usage"]);
+		expect(pi.registeredTools.map((tool) => tool.name)).toEqual(["sol_pi_diagnostics", "obs_search", "obs_recall", "sol_pi_usage"]);
 		expect([...pi.handlers.keys()].sort()).toEqual([
 			"context",
 			"session_shutdown",

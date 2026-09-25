@@ -271,7 +271,8 @@ describe("Command Yield tools", () => {
 		const listed = toolResultText(await call("exec_list"));
 		expect(listed).toContain(handle);
 		expect(listed).toContain("status=running");
-		expect(listed).toContain("npm run dev");
+		expect(listed).toContain("command_sha256=");
+		expect(listed).not.toContain("npm run dev");
 
 		const killed = toolResultText(await call("exec_kill", { handle }));
 		expect(killed).toContain("status=killed");

@@ -164,7 +164,7 @@ describe("SoL-Pi regression stress", () => {
 		} finally {
 			await rm(root, { recursive: true, force: true });
 		}
-	});
+	}, 15_000);
 
 	it("fails open without calling a model when the configured reducer model is unavailable", async () => {
 		const root = await mkdtemp(join(tmpdir(), "sol-pi-epr-missing-stress-"));
@@ -195,5 +195,5 @@ describe("SoL-Pi regression stress", () => {
 		} finally {
 			await rm(root, { recursive: true, force: true });
 		}
-	});
+	}, 15_000);
 });

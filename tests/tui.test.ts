@@ -42,12 +42,12 @@ describe("SoL-Pi TUI savings presentation", () => {
 		);
 
 		expect(component.render(100).map((line) => line.trimEnd()).join("\n")).toBe(
-			"⚡ SoL-Pi · Action Fusion\nMoney saved · 1 model round-trip avoided\noriginal edit renderer",
+			"⚡ SoL-Pi · Action Fusion\nEfficiency · 1 model round-trip avoided\noriginal edit renderer",
 		);
 	});
 
 	it("formats token and byte savings without inventing a currency amount", () => {
-		expect(formatSavingsCount(12_345, "context tokens avoided")).toBe("12,345 context tokens avoided");
+		expect(formatSavingsCount(12_345, "context tokens avoided")).toBe("12,345 estimated context tokens avoided");
 		expect(formatSavingsBytes(78_200)).toBe("76.4 KiB removed from future prompts");
 	});
 
@@ -58,7 +58,7 @@ describe("SoL-Pi TUI savings presentation", () => {
 		showSolPiSavings(context, "Online Context Compact", "84,026 context tokens removed");
 
 		expect(notify).toHaveBeenCalledWith(
-			"⚡ SoL-Pi · Online Context Compact\nMoney saved · 84,026 context tokens removed",
+			"⚡ SoL-Pi · Online Context Compact\nEfficiency · 84,026 context tokens removed",
 			"info",
 		);
 		expect(setStatus).toHaveBeenCalledWith(

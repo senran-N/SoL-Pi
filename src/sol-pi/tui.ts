@@ -21,7 +21,7 @@ const statusTimers = new WeakMap<ExtensionContext["ui"], ReturnType<typeof setTi
 
 export function formatSavingsCount(value: number, unit: string): string {
 	const count = Number.isFinite(value) ? Math.max(0, Math.round(value)) : 0;
-	return `${INTEGER_FORMAT.format(count)} ${unit}`;
+	return `${INTEGER_FORMAT.format(count)} ${unit.includes("tokens") ? "estimated " : ""}${unit}`;
 }
 
 function compactDecimal(value: number): string {
@@ -46,7 +46,7 @@ export function renderSolPiTool(
 	const container = new Container();
 	const title = `${theme.fg("warning", "⚡")} ${theme.fg("accent", theme.bold(`SoL-Pi · ${mechanism}`))}`;
 	container.addChild(new Text(title, 0, 0));
-	container.addChild(new Text(theme.fg("success", `Money saved · ${saving}`), 0, 0));
+	container.addChild(new Text(theme.fg("success", `Efficiency · ${saving}`), 0, 0));
 	if (base) container.addChild(base);
 	return container;
 }
@@ -57,7 +57,7 @@ export function showSolPiSavings(
 	saving: string,
 ): void {
 	if (context.mode !== "tui") return;
-	const message = `⚡ SoL-Pi · ${mechanism}\nMoney saved · ${saving}`;
+	const message = `⚡ SoL-Pi · ${mechanism}\nEfficiency · ${saving}`;
 	context.ui.notify(message, "info");
 	context.ui.setStatus(STATUS_KEY, `⚡ ${mechanism} · ${saving}`);
 

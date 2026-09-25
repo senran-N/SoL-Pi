@@ -300,11 +300,12 @@ describe("windowed compaction wiring", () => {
 		const ledger = readFileSync(windowLedgerPath(join(root, "sol-pi", "session-a")), "utf8")
 			.trim()
 			.split("\n")
-			.map((line) => JSON.parse(line) as Record<string, unknown>);
+			.filter(Boolean).map((line) => JSON.parse(line) as Record<string, unknown>)
+			.filter((record) => record.stage === "decision");
 		expect(ledger.map((record) => record.event)).toEqual(["reset", "summary"]);
 		expect(ledger[0]).toMatchObject({
 			event: "reset",
-			reason: "manual",
+			reason: "window_protection",
 			windowNumber: 1,
 			windowId: "w1",
 			previousWindowId: "w0",

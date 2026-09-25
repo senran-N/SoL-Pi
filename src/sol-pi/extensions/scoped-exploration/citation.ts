@@ -9,9 +9,8 @@
  * redoing the search, and a fluent answer from a smaller model is exactly the
  * kind of thing that reads as trustworthy whether or not it is. So the answer
  * carries citations, and a citation survives only when the quoted text is found
- * at that path and that line right now. Anything else is dropped and reported as
- * dropped; an answer that claims a finding and has no surviving citation is not
- * returned at all.
+ * at that path and that line right now. A rejected citation rejects the answer
+ * as a whole. This verifies source bytes, not the logical entailment of a claim.
  *
  * One citation is one line. A multi-line claim becomes several citations, which
  * keeps the check exact instead of approximate.
@@ -24,6 +23,7 @@ export type RejectedCitation = { readonly citation: Citation; readonly reason: s
 export type CitationCheck = {
 	readonly verified: readonly Citation[];
 	readonly rejected: readonly RejectedCitation[];
+	readonly sources: readonly { readonly citation: Citation; readonly line: string }[];
 };
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -37,7 +37,7 @@ export function parseCitations(value: unknown): readonly Citation[] | undefined 
 	for (const item of value) {
 		if (!isRecord(item)) return undefined;
 		const { path, line, quote } = item;
-		if (typeof path !== "string" || path.length === 0) return undefined;
+		if (typeof path !== "string" || path.length === 0 || Buffer.byteLength(path, "utf8") > 1_000 || /[\u0000-\u001f]/u.test(path)) return undefined;
 		if (typeof line !== "number" || !Number.isSafeInteger(line) || line < 1) return undefined;
 		if (typeof quote !== "string" || quote.trim().length === 0) return undefined;
 		if (Buffer.byteLength(quote, "utf8") > MAX_QUOTE_BYTES) return undefined;
@@ -53,6 +53,7 @@ export async function verifyCitations(
 ): Promise<CitationCheck> {
 	const verified: Citation[] = [];
 	const rejected: RejectedCitation[] = [];
+	const sources: { citation: Citation; line: string }[] = [];
 	for (const citation of citations) {
 		let actual: string | undefined;
 		try {
@@ -70,6 +71,7 @@ export async function verifyCitations(
 			continue;
 		}
 		verified.push(citation);
+		sources.push({ citation, line: actual });
 	}
-	return { verified, rejected };
+	return { verified, rejected, sources };
 }

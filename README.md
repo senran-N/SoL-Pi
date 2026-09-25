@@ -19,7 +19,7 @@
 
 **Spend less without making the agent do less useful work.**
 
-SoL-Pi is a standalone extension for Pi that packages four reusable efficiency mechanisms discovered through scaled auto-research loops. It reduces repeated model turns, context replay, oversized observations, and unnecessary long-log reading while preserving the work and evidence an agent needs to finish a task.
+SoL-Pi is a standalone extension for Pi that packages six reusable efficiency mechanisms discovered through scaled auto-research loops. It reduces repeated model turns, context replay, oversized observations, long command stalls, and unnecessary exploration or log reading while preserving the work and evidence an agent needs to finish a task.
 
 SoL-Pi installs on top of an unmodified Pi release. Every mechanism is opt-in and disabled by default.
 
@@ -29,7 +29,7 @@ Long-running coding agents accumulate repeated work. A file edit is often follow
 
 SoL-Pi grew out of a broader question from our auto-research work: before scaling agent loops, can agents first make the harness itself more efficient? The search focused on constrained efficiency: reducing token traffic, inference work, and agent turns without stopping early, skipping verification, or hiding evidence.
 
-The standalone release contains four mechanisms that survived that process. They operate at different parts of the harness and compose through Pi's public extension APIs.
+The standalone release contains six mechanisms that survived that process. They operate at different parts of the harness and compose through Pi's public extension APIs.
 
 A fifth mechanism, Command Yield, addresses a different failure. Pi's shell tool has no default timeout, so a command that crashed without exiting, deadlocked, or blocked on stdin holds the turn open until someone interrupts it. Command Yield gives the foreground a deadline without giving the command a kill.
 
@@ -119,7 +119,7 @@ For the complete schema, see [Configuration](docs/configuration.md). Coding agen
 
 ## Storage and Security
 
-Observation Pack sends large text-only tool results in full for the first two provider requests, then uses a stable `obs_recall` placeholder. After the first placeholder projection, Pi 0.87's append-only `context_edit` boundary persists that replacement for the active branch without rewriting the raw session message; resume and native compaction therefore do not restore the large text. Image-bearing or mixed-content results remain under Pi's native image normalization and model input-limit handling.
+Observation Pack archives large text-only tool results and uses a stable `obs_recall` handle when its conservative policy or an explicit tool intent shows that packing is worthwhile. After a placeholder projection, Pi 0.87's append-only `context_edit` boundary persists that replacement for the active branch without rewriting the raw session message; resume and native compaction therefore do not restore the large text. Image-bearing or mixed-content results remain under Pi's native image normalization and model input-limit handling.
 
 ObservationPack, Evidence-Preserving Reducer, and Scoped Exploration store session-specific archives under:
 
@@ -127,16 +127,17 @@ ObservationPack, Evidence-Preserving Reducer, and Scoped Exploration store sessi
 <session-directory>/sol-pi/<session-id>/
 ├── observation-pack/
 ├── evidence-preserving-reducer/
-└── scoped-exploration/
+├── scoped-exploration/
+└── command-yield/
 ```
 
 They archive eligible source material in this directory. The archived copies remain local and are not automatically deleted when the Pi session ends.
 
-Command Yield writes nothing to disk. A yielded command's output is held in memory, capped per handle, and discarded with the session; command lines are never written to a log, because they can carry credentials. A command that yielded a handle is killed when the Pi session shuts down, so it does not outlive the session.
+Command Yield stores yielded output in a session-derived, permission-restricted spool so a long command can be drained exactly after the foreground returns. The in-memory window is bounded and the spool contains output only; command lines are never written because they can carry credentials. A command that yielded a handle is killed when the Pi session shuts down, so it does not outlive the session.
 
 Online Context Compact stores its state in Pi's session log. After a successful compaction, it starts a new turn and automatically continues the active task. Cancelling the run or exiting Pi does not trigger automatic continuation.
 
-Evidence-Preserving Reducer may send eligible diagnostic-log content to its configured reducer model using Pi-managed authentication. Scoped Exploration may send project file content to its configured explorer model the same way, and keeps a full local transcript of every exploration. Review [SECURITY.md](SECURITY.md) before enabling either one. Do not enable them for content that must remain local.
+Evidence-Preserving Reducer may send eligible diagnostic-log content to its configured reducer model using Pi-managed authentication. Scoped Exploration may send project file content to its configured explorer model the same way; it keeps an auditable transcript and omits content that matches its sensitive-material guard. Review [SECURITY.md](SECURITY.md) before enabling either one. Do not enable them for content that must remain local.
 
 Usage Report is active whenever any mechanism is enabled. It reads Pi's own session records and appends a metadata-only ledger at `<session-directory>/sol-pi/<session-id>/usage.jsonl` for the reducer and explorer calls SoL-Pi dispatches. That ledger stores only route, status, numeric token counts, Pi's recorded cost estimate, and duration; it never records prompts, responses, credentials, or error text. The `sol_pi_usage` tool makes no model call and reports Pi cost estimates, not invoices or a net-savings calculation, with unknown usage and unknown cost counted explicitly.
 

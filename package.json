@@ -19,8 +19,9 @@
 		"sol-pi.example.json"
 	],
 	"scripts": {
-		"test": "vitest run",
+		"test": "vitest run --maxWorkers=4",
 		"typecheck": "tsc --noEmit",
+		"evaluate:context": "node scripts/evaluate-context.mjs",
 		"check": "npm run typecheck && npm test && npm pack --dry-run"
 	},
 	"keywords": [

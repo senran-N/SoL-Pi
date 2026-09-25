@@ -216,6 +216,9 @@ describe("notes inside the window fragment", () => {
 			getSystemPrompt: () => "test prompt",
 			getContextUsage: () => ({ tokens: 195_000, contextWindow: 200_000, percent: 97.5 }),
 		});
+		await (pi.tool("note_read").execute as (...args: unknown[]) => Promise<unknown>)(
+			"import-note", { slug: "design-notes", import_legacy: true }, undefined, undefined, context,
+		);
 
 		type Execute = (
 			toolCallId: string,
